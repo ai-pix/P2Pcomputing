@@ -2,6 +2,12 @@
 
 TranscodeNet is a decentralized, peer-to-peer (P2P) platform designed to distribute video and image transcoding tasks across a network of worker nodes. By leveraging Electron, WebRTC, and FFmpeg, it allows users to either request transcoding services (Clients) or provide their computational power (Providers) to the network.
 
+## 📥 Download
+
+Get the latest alpha version of TranscodeNet:
+
+- **[Windows (v1.2.0-alpha.1)](https://github.com/ai-pix/P2Pcomputing/releases/download/v1.2.0-alpha.1/TranscodeNet.Setup.1.2.0-alpha.1.exe)**
+
 ## 🚀 Features
 
 -   **Decentralized Transcoding:** No central server handles the transcoding. Jobs are distributed directly between peers.
