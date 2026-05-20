@@ -1,0 +1,424 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="TranscodeNet — Peer-to-peer distributed video transcoding. Upload your video, a compute provider transcodes it, all directly browser-to-browser.">
+  <title>TranscodeNet — P2P Video Transcoding Dashboard</title>
+  <link rel="stylesheet" href="css/styles.css">
+</head>
+<body>
+  <div class="mesh-bg"></div>
+
+  <!-- ─── Custom Frameless Titlebar (Visible in Electron Only) ─── -->
+  <div class="app-titlebar" id="appTitlebar">
+    <div class="titlebar-drag">
+      <span class="titlebar-logo">🎬</span>
+      <span class="titlebar-title">TranscodeNet</span>
+    </div>
+    <div class="titlebar-controls">
+      <button class="win-btn" id="winMinBtn" onclick="app.minimizeWindow()">—</button>
+      <button class="win-btn" id="winMaxBtn" onclick="app.maximizeWindow()">▢</button>
+      <button class="win-btn close" id="winCloseBtn" onclick="app.closeWindow()">✕</button>
+    </div>
+  </div>
+
+  <!-- ─── Toast Container ─── -->
+  <div class="toast-container" id="toastContainer"></div>
+
+  <!-- ─── Unified App Workspace Layout ─── -->
+  <div class="workspace-layout">
+    
+    <!-- ─── Left Sidebar Navigation ─── -->
+    <aside class="sidebar">
+      <div class="sidebar-header">
+        <div class="navbar-brand">
+          <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="url(#navGrad)" stroke-width="2">
+            <defs>
+              <linearGradient id="navGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+                <stop offset="0%" stop-color="#059669"/>
+                <stop offset="100%" stop-color="#10b981"/>
+              </linearGradient>
+            </defs>
+            <polygon points="5 3 19 12 5 21 5 3"/>
+            <line x1="12" y1="3" x2="12" y2="21" opacity="0.4"/>
+          </svg>
+          TranscodeNet
+        </div>
+      </div>
+
+      <nav class="sidebar-nav">
+        <button class="nav-item active" onclick="app.switchTab('viewClient', this)">
+          <span class="nav-icon">🎬</span> Transcode Media
+        </button>
+        <button class="nav-item" onclick="app.switchTab('viewProvider', this)">
+          <span class="nav-icon">⚡</span> Share Compute
+        </button>
+        <button class="nav-item" onclick="app.switchTab('viewHistory', this)">
+          <span class="nav-icon">📋</span> Job History
+        </button>
+      </nav>
+
+      <!-- Sidebar Footer Status -->
+      <div class="sidebar-footer">
+        <div class="peer-status-card">
+          <div class="peer-status-header">
+            <span class="status-indicator online"></span>
+            <span class="peer-status-label">Node Ready</span>
+          </div>
+          <span id="clientPeerId" class="peer-id-val">peer-connecting...</span>
+        </div>
+      </div>
+    </aside>
+
+    <!-- ─── Main Content Viewport ─── -->
+    <main class="main-content">
+      
+      <!-- Top Dashboard Header -->
+      <header class="main-header">
+        <div class="header-title">
+          <h1 id="viewTitle">Transcode Media</h1>
+          <p class="view-subtitle" id="viewSubtitle">Decentralized P2P transcoding engine</p>
+        </div>
+        
+        <!-- Global Network Stats -->
+        <div class="header-stats" id="navStats">
+          <div class="header-stat-badge">
+            <span class="badge-label">Active Nodes:</span>
+            <span class="badge-val" id="navProviders">0</span>
+          </div>
+          <div class="header-stat-badge">
+            <span class="badge-label">Total Jobs Done:</span>
+            <span class="badge-val" id="navCompleted">0</span>
+          </div>
+        </div>
+      </header>
+
+      <!-- ─── Dashboard Tab Views ─── -->
+      <div class="viewport-views">
+
+        <!-- 1. Client Dashboard View -->
+        <div class="tab-view active" id="viewClient">
+          <div class="view-container">
+            
+            <!-- Upload Card -->
+            <div class="glass-card" id="uploadCard">
+              <div class="upload-zone" id="uploadZone">
+                <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" style="color:var(--emerald)">
+                  <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                  <polyline points="17 8 12 3 7 8"/>
+                  <line x1="12" y1="3" x2="12" y2="15"/>
+                </svg>
+                <h3>Drop your video or image here</h3>
+                <p>or click to browse — MP4, WebM, AVI, MKV, WebP, JPG, PNG (max 500MB)</p>
+                <input type="file" id="fileInput" accept="video/*,image/*">
+              </div>
+
+              <!-- Settings Panel -->
+              <div class="settings-panel" id="settingsPanel">
+                <div class="file-info" id="fileInfo">
+                  <span class="file-icon">🎞️</span>
+                  <div>
+                    <div class="file-name" id="fileName"></div>
+                    <div class="file-size" id="fileSize"></div>
+                  </div>
+                </div>
+                
+                <div class="settings-grid">
+                  <div class="setting-group">
+                    <label>Output Format</label>
+                    <select id="formatSelect">
+                      <option value="mp4">MP4 (H.264)</option>
+                      <option value="webm">WebM (VP9)</option>
+                      <option value="avi">AVI</option>
+                      <option value="mkv">MKV</option>
+                    </select>
+                  </div>
+                  <div class="setting-group">
+                    <label>Quality Preset</label>
+                    <select id="qualitySelect">
+                      <option value="720">720p</option>
+                      <option value="1080" selected>1080p</option>
+                      <option value="1440">1440p</option>
+                      <option value="2160">4K</option>
+                    </select>
+                  </div>
+                </div>
+
+                <button class="btn btn-primary" onclick="app.submitJob()" id="submitBtn" style="width:100%;">
+                  ⚡ Start Transcoding
+                </button>
+              </div>
+            </div>
+
+            <!-- Job Status -->
+            <div class="job-card" id="jobCard">
+              <div class="job-card-header">
+                <h3>Job Info: <span id="jobIdLabel" style="color:var(--emerald); font-family:var(--mono);"></span></h3>
+                <span class="job-meta-status" id="jobStatusLabel">Waiting for provider...</span>
+              </div>
+              
+              <div class="job-stages" id="jobStages">
+                <div class="job-stage active" id="stageFinding">
+                  <span class="stage-icon">🔍</span>
+                  <span class="stage-label">Finding a provider</span>
+                  <span class="stage-status" id="stageFindingStatus">searching...</span>
+                </div>
+                <div class="job-stage" id="stageUploading">
+                  <span class="stage-icon">📤</span>
+                  <span class="stage-label">Uploading to provider</span>
+                  <span class="stage-status" id="stageUploadingStatus">waiting</span>
+                  <div class="progress-bar"><div class="progress-fill" id="uploadProgress"></div></div>
+                </div>
+                <div class="job-stage" id="stageTranscoding">
+                  <span class="stage-icon">⚙️</span>
+                  <span class="stage-label">Transcoding</span>
+                  <span class="stage-status" id="stageTranscodingStatus">waiting</span>
+                  <div class="progress-bar"><div class="progress-fill" id="transcodeProgress"></div></div>
+                </div>
+                <div class="job-stage" id="stageDownloading">
+                  <span class="stage-icon">📥</span>
+                  <span class="stage-label">Receiving result</span>
+                  <span class="stage-status" id="stageDownloadingStatus">waiting</span>
+                  <div class="progress-bar"><div class="progress-fill" id="downloadProgress"></div></div>
+                </div>
+              </div>
+            </div>
+
+            <!-- Download Result -->
+            <div class="download-area" id="downloadArea">
+              <div class="glass-card" style="text-align:center; padding:48px 32px;">
+                <div style="font-size:3.5rem; margin-bottom:16px;">✅</div>
+                <h3>Transcoding Complete!</h3>
+                <p style="color:var(--text-secondary); margin:8px 0 24px; font-size:0.95rem;" id="resultInfo"></p>
+                <button class="btn btn-primary" id="downloadBtn" onclick="app.downloadResult()">📥 Download Result</button>
+              </div>
+            </div>
+
+          </div>
+        </div>
+
+        <!-- 2. Provider Dashboard View -->
+        <div class="tab-view" id="viewProvider">
+          <div class="view-container">
+            
+            <div class="dash-inner-header">
+              <h3>⚡ Node Host Panel</h3>
+              <div class="provider-toggle">
+                <button class="toggle-switch" id="providerToggle" onclick="app.toggleProvider()"></button>
+                <span class="toggle-label" id="providerToggleLabel">Offline</span>
+              </div>
+            </div>
+
+            <!-- Compute Module settings configuration -->
+            <div class="glass-card" style="margin-bottom: 24px;">
+              <h4 style="margin-bottom: 16px; font-weight: 800; font-size: 0.95rem; text-transform: uppercase; letter-spacing: 0.05em; color: var(--emerald);">🛠️ Node Settings & Compute Modules</h4>
+              <div style="display: flex; gap: 24px; flex-wrap: wrap;">
+                <label style="display: flex; align-items: center; gap: 10px; cursor: pointer; font-size: 0.95rem; font-weight: 600; color: var(--text-primary); transition: color 0.2s;">
+                  <input type="checkbox" id="srvVideo" checked onchange="app.updateProviderServices()" style="accent-color: var(--emerald); width: 18px; height: 18px; cursor: pointer;">
+                  🎬 Video Transcoding Module
+                </label>
+                <label style="display: flex; align-items: center; gap: 10px; cursor: pointer; font-size: 0.95rem; font-weight: 600; color: var(--text-primary); transition: color 0.2s;">
+                  <input type="checkbox" id="srvImage" checked onchange="app.updateProviderServices()" style="accent-color: var(--emerald); width: 18px; height: 18px; cursor: pointer;">
+                  📸 Photo Transcoding Module
+                </label>
+              </div>
+            </div>
+
+            <div class="provider-stats">
+              <div class="stat-card">
+                <div class="stat-value" id="provJobsDone">0</div>
+                <div class="stat-label">Jobs Done</div>
+              </div>
+              <div class="stat-card">
+                <div class="stat-value" id="provDataProcessed">0 MB</div>
+                <div class="stat-label">Data Processed</div>
+              </div>
+              <div class="stat-card">
+                <div class="stat-value" id="provUptime">0m</div>
+                <div class="stat-label">Uptime</div>
+              </div>
+              <div class="stat-card">
+                <div class="stat-value" id="provStatus">Offline</div>
+                <div class="stat-label">Status</div>
+              </div>
+            </div>
+
+            <!-- Incoming Job Notification -->
+            <div class="job-notification" id="jobNotification">
+              <div class="job-notification-header">
+                <h4>📥 Incoming Transcoding Job</h4>
+              </div>
+              <div class="job-details" id="jobNotifDetails"></div>
+              <div class="job-actions">
+                <button class="btn btn-success btn-sm" onclick="app.acceptJob()">✓ Accept Job</button>
+                <button class="btn btn-danger btn-sm" onclick="app.declineJob()">✗ Decline</button>
+              </div>
+            </div>
+
+            <!-- Processing View -->
+            <div class="processing-view" id="processingView">
+              <div class="glass-card">
+                <h3 style="margin-bottom:16px;">Processing Job: <span id="provJobId" style="color:var(--emerald); font-family:var(--mono);"></span></h3>
+                <div class="job-stages">
+                  <div class="job-stage active" id="provStageReceive">
+                    <span class="stage-icon">📥</span>
+                    <span class="stage-label">Receiving file</span>
+                    <span class="stage-status" id="provReceiveStatus">waiting</span>
+                    <div class="progress-bar"><div class="progress-fill" id="provReceiveProgress"></div></div>
+                  </div>
+                  <div class="job-stage" id="provStageTranscode">
+                    <span class="stage-icon">⚙️</span>
+                    <span class="stage-label">Transcoding</span>
+                    <span class="stage-status" id="provStageTranscodeStatus">waiting</span>
+                    <div class="progress-bar"><div class="progress-fill" id="provStageTranscodeProgress"></div></div>
+                  </div>
+                  <div class="job-stage" id="provStageSend">
+                    <span class="stage-icon">📤</span>
+                    <span class="stage-label">Sending result</span>
+                    <span class="stage-status" id="provStageSendStatus">waiting</span>
+                    <div class="progress-bar"><div class="progress-fill" id="provStageSendProgress"></div></div>
+                  </div>
+                </div>
+                <div class="ffmpeg-log" id="ffmpegLog">Waiting for file...</div>
+              </div>
+            </div>
+
+            <!-- Idle State -->
+            <div class="glass-card" id="providerIdle" style="text-align:center; padding:64px 32px;">
+              <div style="font-size:3.5rem; margin-bottom:16px; opacity:0.6;">💤</div>
+              <h3 style="color:var(--text-secondary);">Worker Node Inactive</h3>
+              <p style="color:var(--text-muted); font-size:0.9rem; margin-top:8px; max-width: 400px; margin-left: auto; margin-right: auto;">
+                Toggle the switch in the header online to start polling and receiving distributed video encoding requests.
+              </p>
+            </div>
+
+          </div>
+        </div>
+
+        <!-- 3. History Dashboard View -->
+        <div class="tab-view" id="viewHistory">
+          <div class="view-container">
+            
+            <div class="dash-inner-header">
+              <h3>📋 Job Execution Log Database</h3>
+              <div style="display:flex; gap:12px; align-items:center;">
+                <select id="historyFilter" class="history-filter" onchange="app.filterHistory()">
+                  <option value="all">All Logs</option>
+                  <option value="complete">✅ Completed</option>
+                  <option value="failed">❌ Failed</option>
+                </select>
+                <button class="btn btn-secondary btn-sm" onclick="app.refreshHistory()">↻ Refresh</button>
+                <button class="btn btn-danger btn-sm" onclick="app.clearHistory()">🗑 Clear DB</button>
+              </div>
+            </div>
+
+            <!-- Summary Stats -->
+            <div class="history-summary" id="historySummary">
+              <div class="summary-item">
+                <span class="summary-val" id="histTotal">0</span>
+                <span class="summary-label">Total Handled</span>
+              </div>
+              <div class="summary-item summary-success">
+                <span class="summary-val" id="histSuccess">0</span>
+                <span class="summary-label">Success</span>
+              </div>
+              <div class="summary-item summary-error">
+                <span class="summary-val" id="histFailed">0</span>
+                <span class="summary-label">Failed</span>
+              </div>
+              <div class="summary-item">
+                <span class="summary-val" id="histErrorRate">0%</span>
+                <span class="summary-label">Failure Rate</span>
+              </div>
+            </div>
+
+            <!-- Job Table -->
+            <div class="glass-card" style="padding:0; overflow:hidden;">
+              <div class="history-table-wrap">
+                <table class="history-table" id="historyTable">
+                  <thead>
+                    <tr>
+                      <th>Job ID</th>
+                      <th>File Name</th>
+                      <th>Output Specs</th>
+                      <th>Status</th>
+                      <th>Time Cost</th>
+                      <th>Execution Timestamp</th>
+                      <th>Console Logs</th>
+                    </tr>
+                  </thead>
+                  <tbody id="historyBody">
+                    <tr class="empty-row">
+                      <td colspan="7" style="text-align:center; padding:64px; color:var(--text-muted);">
+                        No database execution records found.
+                      </td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+
+            <!-- Logs and Error Detail Panel -->
+            <div class="error-detail-panel" id="errorDetailPanel">
+              <div class="glass-card" style="margin-top: 32px;">
+                <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:24px;">
+                  <h3 style="font-weight: 800;">🔍 Trace Summary: <span id="detailJobId" style="color:var(--emerald); font-family:var(--mono);"></span></h3>
+                  <button class="btn btn-secondary btn-sm" onclick="app.closeDetail()">✕ Close Panel</button>
+                </div>
+                <div class="detail-grid">
+                  <div class="detail-item"><span class="detail-label">File</span><span class="detail-val" id="detailFile"></span></div>
+                  <div class="detail-item"><span class="detail-label">Format</span><span class="detail-val" id="detailFormat"></span></div>
+                  <div class="detail-item"><span class="detail-label">Quality</span><span class="detail-val" id="detailQuality"></span></div>
+                  <div class="detail-item"><span class="detail-label">Status</span><span class="detail-val" id="detailStatus"></span></div>
+                  <div class="detail-item"><span class="detail-label">Duration</span><span class="detail-val" id="detailDuration"></span></div>
+                  <div class="detail-item"><span class="detail-label">Timestamp</span><span class="detail-val" id="detailTime"></span></div>
+                </div>
+                
+                <!-- Error Trace -->
+                <div id="detailErrorSection" style="display:none; margin-top:24px;">
+                  <h4 style="color:var(--red); margin-bottom:8px; font-weight:800;">❌ Error Message</h4>
+                  <div class="error-message-box" id="detailErrorMsg"></div>
+                  <div id="detailStackSection" style="display:none; margin-top:16px;">
+                    <h4 style="color:var(--amber); margin-bottom:8px; font-weight:800;">📜 Stack Trace</h4>
+                    <div class="error-message-box stack-trace" id="detailStack"></div>
+                  </div>
+                </div>
+                
+                <!-- FFmpeg Logs -->
+                <div style="margin-top:24px;">
+                  <h4 style="margin-bottom:8px; font-weight:800;">📝 Log Stream</h4>
+                  <div class="ffmpeg-log" id="detailLogs" style="max-height:300px; background:#0f172a;">No logs recorded</div>
+                </div>
+              </div>
+            </div>
+
+          </div>
+        </div>
+
+      </div>
+    </main>
+
+  </div>
+
+  <!-- ─── Auto-Update Notification Card ─── -->
+  <div class="update-card" id="updateCard">
+    <div class="update-card-icon">🚀</div>
+    <div class="update-card-body">
+      <div class="update-card-title" id="updateTitle">Update Available</div>
+      <div class="update-card-desc" id="updateDesc">A new version is ready to download.</div>
+    </div>
+    <div class="update-card-actions">
+      <button class="btn btn-primary btn-sm" id="updateActionBtn" onclick="app.downloadUpdate()">Download</button>
+      <button class="btn btn-secondary btn-sm" id="updateDismissBtn" onclick="app.dismissUpdate()">Later</button>
+    </div>
+  </div>
+
+  <!-- Scripts -->
+  <script src="js/ui.js"></script>
+  <script src="js/signaling.js"></script>
+  <script src="js/peer.js"></script>
+  <script src="js/transcoder.js"></script>
+  <script src="js/app.js"></script>
+</body>
+</html>

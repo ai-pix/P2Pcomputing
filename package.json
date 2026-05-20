@@ -1,0 +1,44 @@
+{
+  "name": "transcode-net",
+  "version": "1.1.1",
+  "description": "P2P Distributed Video Transcoding Platform",
+  "main": "main.js",
+  "scripts": {
+    "start": "node server/index.js",
+    "dev": "node server/index.js",
+    "electron": "electron .",
+    "dist": "electron-builder --win"
+  },
+  "dependencies": {
+    "@ffmpeg/core": "^0.12.6",
+    "@ffmpeg/ffmpeg": "^0.12.10",
+    "@ffmpeg/util": "^0.12.1",
+    "electron-updater": "^6.8.3",
+    "express": "^4.18.2",
+    "ffmpeg-static": "^5.3.0",
+    "ws": "^8.16.0"
+  },
+  "devDependencies": {
+    "electron": "^42.1.0",
+    "electron-builder": "^26.8.1"
+  },
+  "build": {
+    "appId": "com.transcodenet.app",
+    "productName": "TranscodeNet",
+    "directories": {
+      "output": "dist"
+    },
+    "win": {
+      "target": [
+        "nsis"
+      ]
+    },
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "ai-pix",
+        "repo": "P2Pcomputing"
+      }
+    ]
+  }
+}
