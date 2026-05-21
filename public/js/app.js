@@ -34,6 +34,13 @@ const app = {
       window.api.onUpdateDownloaded((data) => {
         this._showUpdateCard('downloaded', data.version);
       });
+    } else {
+      // Hide Share Compute in web version
+      const navShareCompute = document.getElementById('navShareCompute');
+      if (navShareCompute) navShareCompute.style.display = 'none';
+      
+      const viewProvider = document.getElementById('viewProvider');
+      if (viewProvider) viewProvider.style.display = 'none';
     }
     signaling.connect();
     signaling.on('welcome', (msg) => {
