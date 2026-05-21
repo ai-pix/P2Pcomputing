@@ -56,13 +56,13 @@ const UI = {
     const input = document.getElementById(fileInputId);
 
     zone.addEventListener('click', () => input.click());
-    input.addEventListener('change', (e) => { if (e.target.files[0]) onFile(e.target.files[0]); });
+    input.addEventListener('change', (e) => { if (e.target.files.length) onFile(e.target.files); });
 
     zone.addEventListener('dragover', (e) => { e.preventDefault(); zone.classList.add('drag-over'); });
     zone.addEventListener('dragleave', () => zone.classList.remove('drag-over'));
     zone.addEventListener('drop', (e) => {
       e.preventDefault(); zone.classList.remove('drag-over');
-      if (e.dataTransfer.files[0]) onFile(e.dataTransfer.files[0]);
+      if (e.dataTransfer.files.length) onFile(e.dataTransfer.files);
     });
   }
 };

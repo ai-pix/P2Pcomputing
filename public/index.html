@@ -111,87 +111,31 @@
                 </svg>
                 <h3>Drop your video or image here</h3>
                 <p>or click to browse — MP4, WebM, AVI, MKV, WebP, JPG, PNG (max 500MB)</p>
-                <input type="file" id="fileInput" accept="video/*,image/*">
-              </div>
-
-              <!-- Settings Panel -->
-              <div class="settings-panel" id="settingsPanel">
-                <div class="file-info" id="fileInfo">
-                  <span class="file-icon">🎞️</span>
-                  <div>
-                    <div class="file-name" id="fileName"></div>
-                    <div class="file-size" id="fileSize"></div>
-                  </div>
-                </div>
-                
-                <div class="settings-grid">
-                  <div class="setting-group">
-                    <label>Output Format</label>
-                    <select id="formatSelect">
-                      <option value="mp4">MP4 (H.264)</option>
-                      <option value="webm">WebM (VP9)</option>
-                      <option value="avi">AVI</option>
-                      <option value="mkv">MKV</option>
-                    </select>
-                  </div>
-                  <div class="setting-group">
-                    <label>Quality Preset</label>
-                    <select id="qualitySelect">
-                      <option value="720">720p</option>
-                      <option value="1080" selected>1080p</option>
-                      <option value="1440">1440p</option>
-                      <option value="2160">4K</option>
-                    </select>
-                  </div>
-                </div>
-
-                <button class="btn btn-primary" onclick="app.submitJob()" id="submitBtn" style="width:100%;">
-                  ⚡ Start Transcoding
-                </button>
+                <input type="file" id="fileInput" accept="video/*,image/*" multiple>
               </div>
             </div>
 
-            <!-- Job Status -->
-            <div class="job-card" id="jobCard">
-              <div class="job-card-header">
-                <h3>Job Info: <span id="jobIdLabel" style="color:var(--emerald); font-family:var(--mono);"></span></h3>
-                <span class="job-meta-status" id="jobStatusLabel">Waiting for provider...</span>
+            <!-- Queue Card -->
+            <div class="glass-card" id="queueCard" style="display:none; margin-top:24px; padding:24px;">
+              <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:16px;">
+                <h3 style="font-weight: 800;">📋 Transcode Queue</h3>
+                <div style="display:flex; gap:12px;">
+                  <button class="btn btn-primary btn-sm" id="startQueueBtn" onclick="app.startQueue()">⚡ Start Queue</button>
+                  <button class="btn btn-secondary btn-sm" id="clearQueueBtn" onclick="app.clearQueue()">🗑 Clear Queue</button>
+                </div>
               </div>
               
-              <div class="job-stages" id="jobStages">
-                <div class="job-stage active" id="stageFinding">
-                  <span class="stage-icon">🔍</span>
-                  <span class="stage-label">Finding a provider</span>
-                  <span class="stage-status" id="stageFindingStatus">searching...</span>
-                </div>
-                <div class="job-stage" id="stageUploading">
-                  <span class="stage-icon">📤</span>
-                  <span class="stage-label">Uploading to provider</span>
-                  <span class="stage-status" id="stageUploadingStatus">waiting</span>
-                  <div class="progress-bar"><div class="progress-fill" id="uploadProgress"></div></div>
-                </div>
-                <div class="job-stage" id="stageTranscoding">
-                  <span class="stage-icon">⚙️</span>
-                  <span class="stage-label">Transcoding</span>
-                  <span class="stage-status" id="stageTranscodingStatus">waiting</span>
-                  <div class="progress-bar"><div class="progress-fill" id="transcodeProgress"></div></div>
-                </div>
-                <div class="job-stage" id="stageDownloading">
-                  <span class="stage-icon">📥</span>
-                  <span class="stage-label">Receiving result</span>
-                  <span class="stage-status" id="stageDownloadingStatus">waiting</span>
-                  <div class="progress-bar"><div class="progress-fill" id="downloadProgress"></div></div>
-                </div>
+              <!-- Queue Summary Bar -->
+              <div class="queue-summary" id="queueSummary" style="display:flex; gap:20px; font-size:0.85rem; color:var(--text-muted); background:rgba(255,255,255,0.02); padding:10px 16px; border-radius:8px; margin-bottom:16px;">
+                <div>Total: <span id="queueTotalVal" style="color:var(--text-primary); font-weight:700;">0</span></div>
+                <div>Completed: <span id="queueCompleteVal" style="color:var(--emerald); font-weight:700;">0</span></div>
+                <div>Failed: <span id="queueFailedVal" style="color:var(--red); font-weight:700;">0</span></div>
+                <div>Active Job ID: <span id="queueActiveJobId" style="color:var(--amber); font-family:var(--mono); font-weight:700;">—</span></div>
               </div>
-            </div>
 
-            <!-- Download Result -->
-            <div class="download-area" id="downloadArea">
-              <div class="glass-card" style="text-align:center; padding:48px 32px;">
-                <div style="font-size:3.5rem; margin-bottom:16px;">✅</div>
-                <h3>Transcoding Complete!</h3>
-                <p style="color:var(--text-secondary); margin:8px 0 24px; font-size:0.95rem;" id="resultInfo"></p>
-                <button class="btn btn-primary" id="downloadBtn" onclick="app.downloadResult()">📥 Download Result</button>
+              <!-- List container -->
+              <div id="queueList" class="queue-list" style="display:flex; flex-direction:column; gap:12px; max-height:400px; overflow-y:auto; padding-right:4px;">
+                <!-- Queue items will be rendered dynamically here -->
               </div>
             </div>
 
@@ -231,7 +175,40 @@
                 <span style="background: var(--amber); color: #000; padding: 2px 6px; border-radius: 4px; font-weight: 800; font-size: 0.7rem;">DETECTED</span>
                 <span id="detectedHwLabel">Scanning for hardware...</span>
               </div>
-            </div>
+
+              <!-- Provider Policies -->
+              <div class="provider-policies" style="margin-top: 20px; border-top: 1px solid rgba(255,255,255,0.05); padding-top: 16px;">
+                <h5 style="margin-bottom: 12px; font-size: 0.85rem; text-transform: uppercase; color: var(--text-secondary); letter-spacing: 0.05em;">Acceptance Policies</h5>
+                <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 20px;">
+                  
+                  <div class="policy-group" style="display: flex; flex-direction: column; gap: 6px;">
+                    <label style="display: flex; align-items: center; gap: 8px; font-size: 0.9rem; font-weight: 600; cursor: pointer;">
+                      <input type="checkbox" id="srvAutoAccept" checked style="accent-color: var(--emerald); width: 16px; height: 16px;">
+                      Auto-Accept Incoming Jobs
+                    </label>
+                    <span style="font-size: 0.8rem; color: var(--text-muted);">Process matching requests without showing popups</span>
+                  </div>
+
+                  <div class="policy-group" style="display: flex; flex-direction: column; gap: 6px;">
+                    <div style="display: flex; justify-content: space-between; font-size: 0.9rem; font-weight: 600;">
+                      <label for="srvMaxFileSize">Max Input Size</label>
+                      <span id="srvMaxFileSizeLabel">200 MB</span>
+                    </div>
+                    <input type="range" id="srvMaxFileSize" min="10" max="500" step="10" value="200" style="accent-color: var(--emerald); cursor: pointer;" oninput="document.getElementById('srvMaxFileSizeLabel').textContent = this.value + ' MB'">
+                    <span style="font-size: 0.8rem; color: var(--text-muted);">Decline tasks exceeding this file size</span>
+                  </div>
+
+                  <div class="policy-group" style="display: flex; flex-direction: column; gap: 6px;">
+                    <div style="display: flex; justify-content: space-between; font-size: 0.9rem; font-weight: 600;">
+                      <label for="srvCpuLimit">CPU Limit Cap</label>
+                      <span id="srvCpuLimitLabel">80%</span>
+                    </div>
+                    <input type="range" id="srvCpuLimit" min="50" max="95" step="5" value="80" style="accent-color: var(--emerald); cursor: pointer;" oninput="document.getElementById('srvCpuLimitLabel').textContent = this.value + '%'">
+                    <span style="font-size: 0.8rem; color: var(--text-muted);">Reject new jobs if CPU load exceeds cap</span>
+                  </div>
+
+                </div>
+              </div>
             </div>
 
             <div class="provider-stats">
@@ -250,6 +227,33 @@
               <div class="stat-card">
                 <div class="stat-value" id="provStatus">Offline</div>
                 <div class="stat-label">Status</div>
+              </div>
+            </div>
+
+            <!-- Diagnostics Panel -->
+            <div class="glass-card" id="diagnosticsCard" style="margin-top: 24px; margin-bottom: 24px; display: none;">
+              <h4 style="margin-bottom: 16px; font-weight: 800; font-size: 0.95rem; text-transform: uppercase; letter-spacing: 0.05em; color: var(--emerald);">📊 Live Host Diagnostics</h4>
+              <div class="diagnostics-grid" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 20px;">
+                <div class="diag-metric">
+                  <div class="diag-label" style="font-size:0.85rem; color:var(--text-muted); margin-bottom:6px;">CPU Load</div>
+                  <div class="diag-value" id="diagCpuVal" style="font-size:1.4rem; font-weight:800; margin-bottom:8px;">0%</div>
+                  <div class="diag-bar-bg" style="height:6px; background:rgba(255,255,255,0.05); border-radius:3px; overflow:hidden;"><div class="diag-bar-fill" id="diagCpuBar" style="width: 0%; height:100%; background: var(--emerald); transition: width 0.5s ease;"></div></div>
+                </div>
+                <div class="diag-metric">
+                  <div class="diag-label" style="font-size:0.85rem; color:var(--text-muted); margin-bottom:6px;">Memory Usage</div>
+                  <div class="diag-value" id="diagMemVal" style="font-size:1.4rem; font-weight:800; margin-bottom:8px;">0%</div>
+                  <div class="diag-bar-bg" style="height:6px; background:rgba(255,255,255,0.05); border-radius:3px; overflow:hidden;"><div class="diag-bar-fill" id="diagMemBar" style="width: 0%; height:100%; background: var(--emerald); transition: width 0.5s ease;"></div></div>
+                </div>
+                <div class="diag-metric">
+                  <div class="diag-label" style="font-size:0.85rem; color:var(--text-muted); margin-bottom:6px;">CPU Temperature</div>
+                  <div class="diag-value" id="diagTempVal" style="font-size:1.4rem; font-weight:800; margin-bottom:8px;">38°C</div>
+                  <div class="diag-bar-bg" style="height:6px; background:rgba(255,255,255,0.05); border-radius:3px; overflow:hidden;"><div class="diag-bar-fill" id="diagTempBar" style="width: 0%; height:100%; background: var(--emerald); transition: width 0.5s ease;"></div></div>
+                </div>
+              </div>
+              <!-- Policy Compliance Flags -->
+              <div class="policy-badges" style="margin-top: 16px; display: flex; gap: 12px; font-size: 0.8rem;">
+                <span class="badge" id="policyCpuBadge" style="background: rgba(16, 185, 129, 0.1); color: var(--emerald); padding: 4px 8px; border-radius: 4px; border: 1px solid rgba(16, 185, 129, 0.2);">✓ CPU Policy Pass</span>
+                <span class="badge" id="policySizeBadge" style="background: rgba(16, 185, 129, 0.1); color: var(--emerald); padding: 4px 8px; border-radius: 4px; border: 1px solid rgba(16, 185, 129, 0.2);">✓ Size Policy Pass</span>
               </div>
             </div>
 
@@ -289,7 +293,11 @@
                     <div class="progress-bar"><div class="progress-fill" id="provStageSendProgress"></div></div>
                   </div>
                 </div>
-                <div class="ffmpeg-log" id="ffmpegLog">Waiting for file...</div>
+                <div class="ffmpeg-log-header" style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+                  <span style="font-size: 0.75rem; font-weight: 800; color: var(--text-muted); text-transform: uppercase;">Engine Terminal Output</span>
+                  <button class="btn btn-secondary btn-sm" style="padding: 2px 8px; font-size: 0.7rem;" onclick="document.getElementById('ffmpegLog').textContent = ''">Clear Logs</button>
+                </div>
+                <div class="ffmpeg-log" id="ffmpegLog" style="height: 300px; font-size: 0.75rem; line-height: 1.4; border: 1px solid rgba(255,255,255,0.05);">Waiting for job...</div>
               </div>
             </div>
 

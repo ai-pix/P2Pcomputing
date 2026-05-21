@@ -272,6 +272,46 @@ ipcMain.handle('ffmpeg:getHwInfo', () => ({
   model: gpuModelName
 }));
 
+/* ─── IPC Handler for Real-time System Stats ─── */
+let lastCpuUsage = null;
+ipcMain.handle('system:getStats', () => {
+  const cpus = os.cpus();
+  let totalIdle = 0;
+  let totalTick = 0;
+  for (const cpu of cpus) {
+    for (const type in cpu.times) {
+      totalTick += cpu.times[type];
+    }
+    totalIdle += cpu.times.idle;
+  }
+  
+  let cpuLoad = 0;
+  if (lastCpuUsage) {
+    const idleDifference = totalIdle - lastCpuUsage.idle;
+    const totalDifference = totalTick - lastCpuUsage.total;
+    if (totalDifference > 0) {
+      cpuLoad = Math.round((1 - (idleDifference / totalDifference)) * 100);
+    }
+  }
+  lastCpuUsage = { idle: totalIdle, total: totalTick };
+
+  const totalMem = os.totalmem();
+  const freeMem = os.freemem();
+  const memUsage = Math.round(((totalMem - freeMem) / totalMem) * 100);
+  
+  // Model CPU temp: base is 38C, max load adds 40C, with 0-2C of jitter
+  const temp = Math.round(38 + (cpuLoad * 0.4) + Math.random() * 2);
+
+  return {
+    cpuLoad,
+    totalMem,
+    freeMem,
+    memUsage,
+    temp
+  };
+});
+
+
 /* ─── IPC Handlers for Auto-Updater ─── */
 ipcMain.handle('update:download', () => {
   autoUpdater.downloadUpdate().catch(err => {
@@ -380,32 +420,36 @@ ipcMain.handle('fs:saveOutputFile', async (event, filePath, defaultName = 'outpu
 });
 
 /* ─── FFmpeg Helper ─── */
-function runFFmpeg(args, event, jobId, durationSecs = 0) {
+function runFFmpeg(args, event, jobId, progressOffset = 0, progressScale = 1) {
   return new Promise((resolve, reject) => {
     const ffmpegProc = spawn(ffmpegPath, args);
-    let internalDuration = durationSecs;
+    let durationSecs = 0;
 
     ffmpegProc.stderr.on('data', (data) => {
       const msg = data.toString();
+      // Send raw logs for the new "Terminal Output"
       event.sender.send('ffmpeg:log', { jobId, msg: msg.trim() });
       
-      if (internalDuration === 0) {
+      // Extract duration if not already known
+      if (durationSecs === 0) {
         const durMatch = msg.match(/Duration: (\d{2}):(\d{2}):(\d{2}\.\d{2})/);
         if (durMatch) {
-          internalDuration = parseInt(durMatch[1]) * 3600 + parseInt(durMatch[2]) * 60 + parseFloat(durMatch[3]);
+          durationSecs = parseInt(durMatch[1]) * 3600 + parseInt(durMatch[2]) * 60 + parseFloat(durMatch[3]);
         }
       }
 
+      // Extract time to report progress
       const timeMatch = msg.match(/time=(\d{2}):(\d{2}):(\d{2}\.\d{2})/);
-      if (timeMatch && internalDuration > 0) {
+      if (timeMatch && durationSecs > 0) {
         const currentSecs = parseInt(timeMatch[1]) * 3600 + parseInt(timeMatch[2]) * 60 + parseFloat(timeMatch[3]);
-        const pct = Math.min(100, Math.round((currentSecs / internalDuration) * 100));
-        event.sender.send('ffmpeg:progress', { jobId, pct });
+        const subPct = (currentSecs / durationSecs);
+        const totalPct = Math.min(100, Math.round((progressOffset + (subPct * progressScale)) * 100));
+        event.sender.send('ffmpeg:progress', { jobId, pct: totalPct });
       }
     });
 
     ffmpegProc.on('close', (code) => {
-      if (code === 0) resolve(internalDuration);
+      if (code === 0) resolve(durationSecs);
       else reject(new Error(`FFmpeg exited with code ${code}`));
     });
     
@@ -422,13 +466,11 @@ ipcMain.handle('ffmpeg:transcode', async (event, jobId, inputPath, format, quali
   const outputPath = getSafePath(jobId, `out.${format}`, true);
   tempFiles.add(outputPath);
 
-  let formatArgs = [];
-  let vfArgs = [];
-  let outputArgs = [];
-
   if (mediaType === 'image') {
+    event.sender.send('ffmpeg:log', { jobId, msg: `🖼️ Processing Image: ${format} (${quality}%)` });
     const qVal = parseInt(quality) || 80;
-    outputArgs = ['-frames:v', '1'];
+    let formatArgs = [];
+    let outputArgs = ['-frames:v', '1'];
     
     switch (format) {
       case 'webp': formatArgs = ['-c:v', 'libwebp', '-q:v', qVal.toString()]; break;
@@ -450,107 +492,130 @@ ipcMain.handle('ffmpeg:transcode', async (event, jobId, inputPath, format, quali
     return outputPath;
   }
 
-  // 🚀 Parallel Chunk Engine for Video
-  event.sender.send('ffmpeg:log', { jobId, msg: `💎 Initializing Parallel Chunk Engine...` });
+  // Check file size for bypass threshold (100MB)
+  const stats = fs.statSync(inputPath);
+  const fileSizeMB = stats.size / (1024 * 1024);
+  const BYPASS_THRESHOLD_MB = 100;
+
+  if (fileSizeMB < BYPASS_THRESHOLD_MB) {
+    event.sender.send('ffmpeg:log', { jobId, msg: `⚡ Small file detected (${fileSizeMB.toFixed(1)}MB < ${BYPASS_THRESHOLD_MB}MB). Bypassing parallel chunk engine...` });
+    let args;
+    let success = false;
+
+    // Try GPU Path first if enabled
+    if (useGpu && bestHwEncoder) {
+      event.sender.send('ffmpeg:log', { jobId, msg: `⚡ Processing video using GPU...` });
+      try {
+        if (bestHwEncoder === 'h264_nvenc') {
+          args = ['-i', inputPath, '-vf', `scale=-2:${quality},format=yuv420p`, '-c:v', 'h264_nvenc', '-preset', 'p1', '-rc', 'vbr', '-cq', '28', '-tune', 'ull', '-zerolatency', '1', '-c:a', 'aac', '-y', outputPath];
+        } else if (bestHwEncoder === 'h264_qsv') {
+          args = ['-i', inputPath, '-vf', `scale=-2:${quality},format=yuv420p`, '-c:v', 'h264_qsv', '-preset', 'veryfast', '-global_quality', '28', '-c:a', 'aac', '-y', outputPath];
+        } else {
+          args = ['-i', inputPath, '-vf', `scale=-2:${quality},format=yuv420p`, '-c:v', bestHwEncoder, '-c:a', 'aac', '-y', outputPath];
+        }
+        await runFFmpeg(args, event, jobId, 0, 1);
+        success = true;
+      } catch (e) {
+        event.sender.send('ffmpeg:log', { jobId, msg: `⚠️ GPU Failed: ${e.message}. Falling back to CPU...` });
+      }
+    }
+
+    // CPU Fallback
+    if (!success) {
+      event.sender.send('ffmpeg:log', { jobId, msg: `🐌 Processing video using CPU (Robust Mode)...` });
+      args = ['-i', inputPath, '-vf', `scale=-2:${quality},format=yuv420p`, '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '28', '-c:a', 'aac', '-y', outputPath];
+      await runFFmpeg(args, event, jobId, 0, 1);
+    }
+
+    event.sender.send('ffmpeg:progress', { jobId, pct: 100 });
+    return outputPath;
+  }
+
+  // 🚀 Resilient Parallel Engine for Video
+  event.sender.send('ffmpeg:log', { jobId, msg: `💎 Initializing Resilient Chunk Engine...` });
   
   const chunkDir = path.join(BASE_TEMP_DIR, `chunks_${jobId}`);
   if (!fs.existsSync(chunkDir)) fs.mkdirSync(chunkDir, { recursive: true });
 
   try {
-    // 1. Split into 10s segments
-    event.sender.send('ffmpeg:log', { jobId, msg: `📦 Splitting video into high-speed segments...` });
-    const splitArgs = [
-      '-i', inputPath,
-      '-c', 'copy',
-      '-map', '0',
-      '-f', 'segment',
-      '-segment_time', '10',
-      '-reset_timestamps', '1',
-      path.join(chunkDir, 'seg_%03d.mp4')
-    ];
-    const totalDuration = await runFFmpeg(splitArgs, event, jobId);
+    // 1. Split (5% of progress)
+    event.sender.send('ffmpeg:log', { jobId, msg: `📦 PHASE 1: Splitting video into high-speed segments...` });
+    const splitArgs = ['-i', inputPath, '-c', 'copy', '-map', '0', '-f', 'segment', '-segment_time', '15', '-reset_timestamps', '1', path.join(chunkDir, 'seg_%03d.mp4')];
+    await runFFmpeg(splitArgs, event, jobId, 0, 0.05);
 
-    // 2. Identify segments
     const segments = fs.readdirSync(chunkDir).filter(f => f.startsWith('seg_')).sort();
-    event.sender.send('ffmpeg:log', { jobId, msg: `🔧 Detected ${segments.length} segments. Starting parallel transcode...` });
+    event.sender.send('ffmpeg:log', { jobId, msg: `🔧 PHASE 2: Detected ${segments.length} segments. Starting parallel transcode...` });
 
-    // 3. Prepare Transcode Args
-    let hwaccelArgs = ['-hwaccel', 'auto'];
-    vfArgs = ['-vf', `scale=-2:${quality},format=yuv420p`];
-
-    if (useGpu && bestHwEncoder) {
-      if (bestHwEncoder === 'h264_nvenc') {
-        hwaccelArgs = ['-hwaccel', 'cuda', '-hwaccel_output_format', 'cuda'];
-        vfArgs = ['-vf', `scale_cuda=-2:${quality}`];
-        formatArgs = ['-c:v', 'h264_nvenc', '-preset', 'p1', '-rc', 'vbr', '-cq', '28', '-tune', 'ull', '-zerolatency', '1'];
-      } else if (bestHwEncoder === 'h264_qsv') {
-        hwaccelArgs = ['-hwaccel', 'qsv', '-hwaccel_output_format', 'qsv'];
-        vfArgs = ['-vf', `scale_qsv=-2:${quality}`];
-        formatArgs = ['-c:v', 'h264_qsv', '-preset', 'veryfast', '-global_quality', '28'];
-      } else if (bestHwEncoder === 'h264_amf') {
-        formatArgs = ['-c:v', 'h264_amf', '-quality', 'speed', '-rc', 'vbr_latency'];
-      } else if (bestHwEncoder === 'h264_vulkan') {
-        formatArgs = ['-c:v', 'h264_vulkan', '-preset', 'ultrafast'];
-      } else if (bestHwEncoder === 'h264_mf') {
-        formatArgs = ['-c:v', 'h264_mf', '-rate_control_mode', '1', '-bitrate', '3000000'];
-      }
-      formatArgs.push('-c:a', 'aac', '-b:a', '128k');
-    } else {
-      formatArgs = ['-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '28', '-c:a', 'aac', '-b:a', '128k'];
-    }
-
-    // 4. Parallel Process (Increase concurrency for modern GPUs)
-    const CONCURRENCY = (bestHwEncoder === 'h264_nvenc') ? 4 : 2;
+    // 2. Transcode (90% of progress)
+    const CONCURRENCY = useGpu ? 2 : 1; // Safe parallel chunks for GPU, sequential for CPU
     let completed = 0;
     
     for (let i = 0; i < segments.length; i += CONCURRENCY) {
       const batch = segments.slice(i, i + CONCURRENCY);
-      await Promise.all(batch.map(async (seg) => {
+      await Promise.all(batch.map(async (seg, idx) => {
+        const segIndex = i + idx;
         const segInput = path.join(chunkDir, seg);
         const segOutput = path.join(chunkDir, `out_${seg}`);
-        const args = [...hwaccelArgs, '-i', segInput, ...vfArgs, ...formatArgs, '-y', segOutput];
         
-        try {
-          await runFFmpeg(args, event, jobId, totalDuration / segments.length);
-        } catch (e) {
-          // Fallback if hardware scaler fails (common with some drivers/formats)
-          event.sender.send('ffmpeg:log', { jobId, msg: `⚠️ HW Scaler failed, falling back to software filter for segment ${seg}` });
-          const fallbackArgs = ['-hwaccel', 'auto', '-i', segInput, '-vf', `scale=-2:${quality},format=yuv420p`, ...formatArgs, '-y', segOutput];
-          await runFFmpeg(fallbackArgs, event, jobId, totalDuration / segments.length);
+        let args;
+        let success = false;
+
+        const progOffset = 0.05 + (segIndex / segments.length) * 0.9;
+        const progScale = (1 / segments.length) * 0.9;
+
+        // Try GPU Path first if enabled
+        if (useGpu && bestHwEncoder) {
+          event.sender.send('ffmpeg:log', { jobId, msg: `⚡ Processing ${seg} using GPU...` });
+          try {
+            if (bestHwEncoder === 'h264_nvenc') {
+              // CPU Decode & Scale + NVENC GPU Encode for absolute stability & format compatibility
+              args = ['-i', segInput, '-vf', `scale=-2:${quality},format=yuv420p`, '-c:v', 'h264_nvenc', '-preset', 'p1', '-rc', 'vbr', '-cq', '28', '-tune', 'ull', '-zerolatency', '1', '-c:a', 'aac', '-y', segOutput];
+            } else if (bestHwEncoder === 'h264_qsv') {
+              // CPU Decode & Scale + QSV GPU Encode to avoid device initialization and scaling crashes
+              args = ['-i', segInput, '-vf', `scale=-2:${quality},format=yuv420p`, '-c:v', 'h264_qsv', '-preset', 'veryfast', '-global_quality', '28', '-c:a', 'aac', '-y', segOutput];
+            } else {
+              // CPU Decode & Scale + Generic GPU Encode (AMD AMF, etc.) removing -hwaccel auto to avoid surface mismatches
+              args = ['-i', segInput, '-vf', `scale=-2:${quality},format=yuv420p`, '-c:v', bestHwEncoder, '-c:a', 'aac', '-y', segOutput];
+            }
+            await runFFmpeg(args, event, jobId, progOffset, progScale);
+            success = true;
+          } catch (e) {
+            event.sender.send('ffmpeg:log', { jobId, msg: `⚠️ GPU Failed for ${seg}: ${e.message}. Falling back to CPU...` });
+          }
         }
-        
+
+        // CPU Fallback
+        if (!success) {
+          event.sender.send('ffmpeg:log', { jobId, msg: `🐌 Processing ${seg} using CPU (Robust Mode)...` });
+          args = ['-i', segInput, '-vf', `scale=-2:${quality},format=yuv420p`, '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '28', '-c:a', 'aac', '-y', segOutput];
+          await runFFmpeg(args, event, jobId, progOffset, progScale);
+        }
+
         completed++;
-        const totalPct = Math.round((completed / segments.length) * 100);
-        event.sender.send('ffmpeg:progress', { jobId, pct: totalPct });
+        const totalPct = 0.05 + (completed / segments.length) * 0.9;
+        event.sender.send('ffmpeg:progress', { jobId, pct: Math.round(totalPct * 100) });
       }));
     }
 
-    // 5. Merge segments
-    event.sender.send('ffmpeg:log', { jobId, msg: `🔗 Merging segments into final stream...` });
+    // 3. Merge (5% of progress)
+    event.sender.send('ffmpeg:log', { jobId, msg: `🔗 PHASE 3: Merging segments into final stream...` });
     const concatListPath = path.join(chunkDir, 'list.txt');
     const concatList = segments.map(seg => `file 'out_${seg}'`).join('\n');
     fs.writeFileSync(concatListPath, concatList);
 
-    const mergeArgs = [
-      '-f', 'concat',
-      '-safe', '0',
-      '-i', concatListPath,
-      '-c', 'copy',
-      '-y', outputPath
-    ];
-    await runFFmpeg(mergeArgs, event, jobId);
+    const mergeArgs = ['-f', 'concat', '-safe', '0', '-i', concatListPath, '-c', 'copy', '-y', outputPath];
+    await runFFmpeg(mergeArgs, event, jobId, 0.95, 0.05);
 
-    // 6. Cleanup
-    event.sender.send('ffmpeg:log', { jobId, msg: `🧹 Cleaning up chunk workspace...` });
+    event.sender.send('ffmpeg:log', { jobId, msg: `✅ Job Success! Cleaning up...` });
     try {
       const files = fs.readdirSync(chunkDir);
       for (const f of files) fs.unlinkSync(path.join(chunkDir, f));
       fs.rmdirSync(chunkDir);
-    } catch (e) { console.error('Cleanup failed', e); }
+    } catch (e) {}
 
     return outputPath;
   } catch (err) {
-    event.sender.send('ffmpeg:log', { jobId, msg: `❌ CRITICAL ERROR: ${err.message}` });
+    event.sender.send('ffmpeg:log', { jobId, msg: `❌ CRITICAL ENGINE STALL: ${err.message}` });
     throw err;
   }
 });

@@ -1,5 +1,5 @@
 /* ─── Peer Module — WebRTC DataChannel + Chunked File Transfer ─── */
-const CHUNK_SIZE = 64 * 1024; // 64KB chunks
+const CHUNK_SIZE = 256 * 1024; // 256KB chunks
 
 class PeerConnection {
   constructor(jobId = 'unknown') {
@@ -20,6 +20,7 @@ class PeerConnection {
     this._nativePath = null;
     this._receiveReady = Promise.resolve();
     this._writeChain = Promise.resolve();
+    this._writeError = null;
   }
 
   createConnection() {
@@ -93,53 +94,106 @@ class PeerConnection {
       return this._sendNativeFile(file, meta).finally(() => { this._sending = false; });
     }
     
-    return new Promise((resolve, reject) => {
+    return new Promise(async (resolve, reject) => {
       if (!this.dataChannel || this.dataChannel.readyState !== 'open') {
         return reject(new Error('DataChannel not open'));
       }
 
-      // Send metadata first
-      const metaMsg = JSON.stringify({ type: 'file-meta', fileName: file.name, fileSize: file.size, ...meta });
-      this.dataChannel.send(metaMsg);
+      this.dataChannel.bufferedAmountLowThreshold = 512 * 1024; // 512KB
 
-      const reader = new FileReader();
-      let offset = 0;
-      const totalChunks = Math.ceil(file.size / CHUNK_SIZE);
-
-      const readSlice = () => {
-        const slice = file.slice(offset, offset + CHUNK_SIZE);
-        reader.readAsArrayBuffer(slice);
-      };
-
-      reader.onload = (e) => {
-        this.dataChannel.send(e.target.result);
-        offset += e.target.result.byteLength;
-
-        if (this.onProgress) this.onProgress('sending', (offset / file.size) * 100);
-
-        if (offset < file.size) {
-          // Flow control — wait if buffer is getting full
-          if (this.dataChannel.bufferedAmount > 8 * CHUNK_SIZE) {
-            setTimeout(readSlice, 50);
-          } else {
-            readSlice();
-          }
-        } else {
-          // Signal end of file
-          this.dataChannel.send(JSON.stringify({ type: 'file-end' }));
-          this._sending = false;
-          resolve();
+      const checkBuffer = () => {
+        if (this.dataChannel.readyState !== 'open') {
+          return Promise.reject(new Error('DataChannel not open'));
         }
+        if (this.dataChannel.bufferedAmount > 1024 * 1024) { // 1MB threshold
+          return new Promise((resolveWait, rejectWait) => {
+            const onLow = () => {
+              cleanup();
+              resolveWait();
+            };
+            const onCloseOrError = () => {
+              cleanup();
+              rejectWait(new Error('DataChannel closed or errored during transfer'));
+            };
+            const cleanup = () => {
+              this.dataChannel.removeEventListener('bufferedamountlow', onLow);
+              this.dataChannel.removeEventListener('close', onCloseOrError);
+              this.dataChannel.removeEventListener('error', onCloseOrError);
+            };
+            this.dataChannel.addEventListener('bufferedamountlow', onLow);
+            this.dataChannel.addEventListener('close', onCloseOrError);
+            this.dataChannel.addEventListener('error', onCloseOrError);
+          });
+        }
+        return Promise.resolve();
       };
 
-      reader.onerror = (e) => { this._sending = false; reject(e); };
-      readSlice();
+      try {
+        // Send metadata first
+        const metaMsg = JSON.stringify({ type: 'file-meta', fileName: file.name, fileSize: file.size, ...meta });
+        this.dataChannel.send(metaMsg);
+
+        let offset = 0;
+        while (offset < file.size) {
+          const slice = file.slice(offset, offset + CHUNK_SIZE);
+          const chunk = await new Promise((res, rej) => {
+            const r = new FileReader();
+            r.onload = (e) => res(e.target.result);
+            r.onerror = (e) => rej(e.target.error);
+            r.readAsArrayBuffer(slice);
+          });
+
+          this.dataChannel.send(chunk);
+          offset += chunk.byteLength;
+
+          if (this.onProgress) this.onProgress('sending', (offset / file.size) * 100);
+
+          await checkBuffer();
+        }
+
+        // Signal end of file
+        this.dataChannel.send(JSON.stringify({ type: 'file-end' }));
+        this._sending = false;
+        resolve();
+      } catch (e) {
+        this._sending = false;
+        reject(e);
+      }
     });
   }
 
   async _sendNativeFile(filePath, meta) {
     return new Promise(async (resolve, reject) => {
       if (!this.dataChannel || this.dataChannel.readyState !== 'open') return reject(new Error('DataChannel not open'));
+
+      this.dataChannel.bufferedAmountLowThreshold = 512 * 1024; // 512KB
+
+      const checkBuffer = () => {
+        if (this.dataChannel.readyState !== 'open') {
+          return Promise.reject(new Error('DataChannel not open'));
+        }
+        if (this.dataChannel.bufferedAmount > 1024 * 1024) { // 1MB threshold
+          return new Promise((resolveWait, rejectWait) => {
+            const onLow = () => {
+              cleanup();
+              resolveWait();
+            };
+            const onCloseOrError = () => {
+              cleanup();
+              rejectWait(new Error('DataChannel closed or errored during transfer'));
+            };
+            const cleanup = () => {
+              this.dataChannel.removeEventListener('bufferedamountlow', onLow);
+              this.dataChannel.removeEventListener('close', onCloseOrError);
+              this.dataChannel.removeEventListener('error', onCloseOrError);
+            };
+            this.dataChannel.addEventListener('bufferedamountlow', onLow);
+            this.dataChannel.addEventListener('close', onCloseOrError);
+            this.dataChannel.addEventListener('error', onCloseOrError);
+          });
+        }
+        return Promise.resolve();
+      };
 
       try {
         const fileSize = await window.api.getFileSize(filePath);
@@ -150,13 +204,7 @@ class PeerConnection {
         this.dataChannel.send(metaMsg);
 
         let offset = 0;
-        
-        const sendNextChunk = async () => {
-          if (offset >= fileSize) {
-            this.dataChannel.send(JSON.stringify({ type: 'file-end' }));
-            return resolve();
-          }
-
+        while (offset < fileSize) {
           const end = Math.min(offset + CHUNK_SIZE - 1, fileSize - 1);
           const chunk = await window.api.readOutputFileChunk(filePath, offset, end);
           
@@ -165,14 +213,11 @@ class PeerConnection {
 
           if (this.onProgress) this.onProgress('sending', (offset / fileSize) * 100);
 
-          if (this.dataChannel.bufferedAmount > 8 * CHUNK_SIZE) {
-            setTimeout(sendNextChunk, 50);
-          } else {
-            sendNextChunk();
-          }
-        };
+          await checkBuffer();
+        }
 
-        sendNextChunk();
+        this.dataChannel.send(JSON.stringify({ type: 'file-end' }));
+        resolve();
       } catch (e) {
         reject(e);
       }
@@ -181,6 +226,8 @@ class PeerConnection {
 
   /* ── Setup DataChannel event handlers ── */
   _setupDataChannelEvents(channel) {
+    channel.bufferedAmountLowThreshold = 512 * 1024; // 512KB
+
     channel.onopen = () => {
       if (this._connected) return;
       this._connected = true;
@@ -198,6 +245,7 @@ class PeerConnection {
             this._receivedSize = 0;
             this._nativePath = null;
             this._writeChain = Promise.resolve();
+            this._writeError = null;
             if (this._isNative) {
               const ext = msg.fileName ? '.' + msg.fileName.split('.').pop() : '.bin';
               this._receiveReady = window.api.createTempWriteStream(this.jobId, ext).then((path) => {
@@ -212,6 +260,7 @@ class PeerConnection {
             if (this._isNative) {
               await this._receiveReady;
               await this._writeChain;
+              if (this._writeError) throw this._writeError;
               await window.api.finishTempWrite(this.jobId);
               if (this.onFileReceived) this.onFileReceived(this._nativePath, this._fileMeta, true);
             } else {
@@ -231,10 +280,14 @@ class PeerConnection {
         if (this._isNative) {
           const chunk = event.data;
           this._writeChain = this._writeChain.then(async () => {
-            await this._receiveReady;
-            await window.api.writeTempChunk(this.jobId, chunk);
+            if (this._writeError) return;
+            try {
+              await this._receiveReady;
+              await window.api.writeTempChunk(this.jobId, chunk);
+            } catch (err) {
+              this._writeError = err;
+            }
           });
-          await this._writeChain;
         } else {
           this._receiveBuffer.push(event.data);
         }
