@@ -153,33 +153,47 @@ function getSafePath(jobId, fileName, isOutput = false) {
 
 let bestHwEncoder = null;
 let bestHwLabel = 'None (Software Only)';
+let gpuModelName = 'Standard CPU';
 
 async function detectHardwareAcceleration() {
   return new Promise((resolve) => {
-    const encodersToTry = [
-      { name: 'h264_nvenc', label: 'NVIDIA NVENC' },
-      { name: 'h264_amf', label: 'AMD AMF' },
-      { name: 'h264_qsv', label: 'Intel QuickSync' },
-      { name: 'h264_vulkan', label: 'Vulkan/TPU Accelerator' },
-      { name: 'h264_mf', label: 'Windows Media Foundation' },
-      { name: 'h264_vaapi', label: 'Generic VAAPI' }
-    ];
-
-    const args = ['-encoders'];
-    const ffmpegProc = spawn(ffmpegPath, args);
-    let output = '';
-
-    ffmpegProc.stdout.on('data', (data) => output += data.toString());
-    ffmpegProc.on('close', () => {
-      for (const enc of encodersToTry) {
-        if (output.includes(enc.name)) {
-          bestHwEncoder = enc.name;
-          bestHwLabel = enc.label;
-          console.log(`🚀 Hardware Acceleration Detected: ${enc.label} (${enc.name})`);
-          break;
-        }
+    // 1. Get GPU Model Name
+    const gpuNameProc = spawn('powershell.exe', ['-NoProfile', '-Command', 'Get-CimInstance Win32_VideoController | Select-Object -ExpandProperty Name']);
+    let gpuOutput = '';
+    gpuNameProc.stdout.on('data', (data) => gpuOutput += data.toString());
+    gpuNameProc.on('close', () => {
+      const names = gpuOutput.trim().split(/\r?\n/).filter(n => n.trim());
+      if (names.length > 0) {
+        // Prefer NVIDIA/AMD over Intel if multiple GPUs exist (typical laptop setup)
+        gpuModelName = names.find(n => n.includes('NVIDIA') || n.includes('AMD')) || names[0];
       }
-      resolve(bestHwEncoder);
+
+      // 2. Get Available Encoders
+      const encodersToTry = [
+        { name: 'h264_nvenc', label: 'NVIDIA NVENC' },
+        { name: 'h264_amf', label: 'AMD AMF' },
+        { name: 'h264_qsv', label: 'Intel QuickSync' },
+        { name: 'h264_vulkan', label: 'Vulkan/TPU Accelerator' },
+        { name: 'h264_mf', label: 'Windows Media Foundation' },
+        { name: 'h264_vaapi', label: 'Generic VAAPI' }
+      ];
+
+      const args = ['-encoders'];
+      const ffmpegProc = spawn(ffmpegPath, args);
+      let output = '';
+
+      ffmpegProc.stdout.on('data', (data) => output += data.toString());
+      ffmpegProc.on('close', () => {
+        for (const enc of encodersToTry) {
+          if (output.includes(enc.name)) {
+            bestHwEncoder = enc.name;
+            bestHwLabel = enc.label;
+            console.log(`🚀 Hardware Acceleration Detected: ${enc.label} (${enc.name}) on ${gpuModelName}`);
+            break;
+          }
+        }
+        resolve(bestHwEncoder);
+      });
     });
   });
 }
@@ -254,7 +268,8 @@ ipcMain.handle('notification:send', (event, title, message) => {
 /* ─── IPC Handler for Hardware Info ─── */
 ipcMain.handle('ffmpeg:getHwInfo', () => ({
   encoder: bestHwEncoder,
-  label: bestHwLabel
+  label: bestHwLabel,
+  model: gpuModelName
 }));
 
 /* ─── IPC Handlers for Auto-Updater ─── */
@@ -364,134 +379,164 @@ ipcMain.handle('fs:saveOutputFile', async (event, filePath, defaultName = 'outpu
   return { canceled: false, filePath: destinationPath };
 });
 
-/* ─── IPC Handler for Native FFmpeg ─── */
-ipcMain.handle('ffmpeg:transcode', (event, jobId, inputPath, format, quality, mediaType = 'video', useGpu = false) => {
+/* ─── FFmpeg Helper ─── */
+function runFFmpeg(args, event, jobId, durationSecs = 0) {
   return new Promise((resolve, reject) => {
-    if (!inputPath.startsWith(BASE_TEMP_DIR)) {
-      return reject(new Error('Access denied: Input file outside sandbox'));
-    }
-
-    const outputPath = getSafePath(jobId, `out.${format}`, true);
-    tempFiles.add(outputPath);
-
-    let formatArgs = [];
-    let vfArgs = [];
-    let outputArgs = [];
-    
-    if (mediaType === 'image') {
-      const qVal = parseInt(quality) || 80;
-      outputArgs = ['-frames:v', '1'];
-      
-      switch (format) {
-        case 'webp': 
-          formatArgs = ['-c:v', 'libwebp', '-q:v', qVal.toString()]; 
-          break;
-        case 'jpg': 
-          const qscale = qVal === 100 ? 2 : (qVal >= 80 ? 5 : 15);
-          formatArgs = ['-q:v', qscale.toString()];
-          outputArgs.push('-update', '1');
-          break;
-        case 'png': 
-          const compressionLevel = qVal === 100 ? 9 : (qVal >= 80 ? 6 : 3);
-          formatArgs = ['-compression_level', compressionLevel.toString()];
-          outputArgs.push('-update', '1');
-          break;
-        default: 
-          formatArgs = ['-q:v', '5'];
-      }
-    } else {
-      vfArgs = ['-vf', `scale=-2:${quality}`];
-      
-      switch (format) {
-        case 'mp4': 
-          if (useGpu && bestHwEncoder) {
-            // Use the best detected hardware encoder
-            formatArgs = ['-c:v', bestHwEncoder];
-            
-            // Add encoder-specific tuning
-            if (bestHwEncoder === 'h264_nvenc') {
-              formatArgs.push('-preset', 'p4', '-rc', 'vbr', '-cq', '23');
-            } else if (bestHwEncoder === 'h264_amf') {
-              formatArgs.push('-quality', 'speed', '-rc', 'vbr_latency');
-            } else if (bestHwEncoder === 'h264_qsv') {
-              formatArgs.push('-preset', 'fast', '-global_quality', '23');
-            } else if (bestHwEncoder === 'h264_vulkan') {
-              formatArgs.push('-preset', 'fast');
-            } else if (bestHwEncoder === 'h264_mf') {
-              formatArgs.push('-rate_control_mode', '1', '-bitrate', '2000000');
-            }
-            
-            formatArgs.push('-c:a', 'aac', '-b:a', '128k');
-          } else {
-            formatArgs = ['-c:v', 'libx264', '-preset', 'fast', '-crf', '23', '-c:a', 'aac', '-b:a', '128k'];
-          }
-          break;
-        case 'webm': 
-          formatArgs = ['-c:v', 'libvpx-vp9', '-crf', '30', '-b:v', '0', '-c:a', 'libopus']; 
-          break;
-        case 'avi': 
-          formatArgs = ['-c:v', 'mpeg4', '-q:v', '5', '-c:a', 'mp3']; 
-          break;
-        case 'mkv': 
-          if (useGpu && bestHwEncoder) {
-            formatArgs = ['-c:v', bestHwEncoder];
-            if (bestHwEncoder === 'h264_nvenc') {
-              formatArgs.push('-preset', 'p4', '-rc', 'vbr', '-cq', '23');
-            }
-            formatArgs.push('-c:a', 'aac');
-          } else {
-            formatArgs = ['-c:v', 'libx264', '-preset', 'fast', '-crf', '23', '-c:a', 'aac'];
-          }
-          break;
-        default: 
-          formatArgs = ['-c:v', 'libx264', '-preset', 'fast', '-crf', '23'];
-      }
-    }
-
-    const args = [
-      '-i', inputPath,
-      ...vfArgs,
-      ...formatArgs,
-      ...outputArgs,
-      '-y', // Overwrite output
-      outputPath
-    ];
-
-    event.sender.send('ffmpeg:log', { jobId, msg: `ffmpeg ${args.join(' ')}` });
-
     const ffmpegProc = spawn(ffmpegPath, args);
-    let durationSecs = 0;
+    let internalDuration = durationSecs;
 
     ffmpegProc.stderr.on('data', (data) => {
       const msg = data.toString();
       event.sender.send('ffmpeg:log', { jobId, msg: msg.trim() });
       
-      if (durationSecs === 0) {
+      if (internalDuration === 0) {
         const durMatch = msg.match(/Duration: (\d{2}):(\d{2}):(\d{2}\.\d{2})/);
         if (durMatch) {
-          durationSecs = parseInt(durMatch[1]) * 3600 + parseInt(durMatch[2]) * 60 + parseFloat(durMatch[3]);
+          internalDuration = parseInt(durMatch[1]) * 3600 + parseInt(durMatch[2]) * 60 + parseFloat(durMatch[3]);
         }
       }
 
       const timeMatch = msg.match(/time=(\d{2}):(\d{2}):(\d{2}\.\d{2})/);
-      if (timeMatch && durationSecs > 0) {
+      if (timeMatch && internalDuration > 0) {
         const currentSecs = parseInt(timeMatch[1]) * 3600 + parseInt(timeMatch[2]) * 60 + parseFloat(timeMatch[3]);
-        const pct = Math.min(100, Math.round((currentSecs / durationSecs) * 100));
+        const pct = Math.min(100, Math.round((currentSecs / internalDuration) * 100));
         event.sender.send('ffmpeg:progress', { jobId, pct });
       }
     });
 
     ffmpegProc.on('close', (code) => {
-      if (code === 0) {
-        event.sender.send('ffmpeg:progress', { jobId, pct: 100 });
-        resolve(outputPath);
-      } else {
-        reject(new Error(`FFmpeg exited with code ${code}`));
-      }
+      if (code === 0) resolve(internalDuration);
+      else reject(new Error(`FFmpeg exited with code ${code}`));
     });
     
-    ffmpegProc.on('error', (err) => {
-      reject(err);
-    });
+    ffmpegProc.on('error', (err) => reject(err));
   });
+}
+
+/* ─── IPC Handler for Native FFmpeg ─── */
+ipcMain.handle('ffmpeg:transcode', async (event, jobId, inputPath, format, quality, mediaType = 'video', useGpu = false) => {
+  if (!inputPath.startsWith(BASE_TEMP_DIR)) {
+    throw new Error('Access denied: Input file outside sandbox');
+  }
+
+  const outputPath = getSafePath(jobId, `out.${format}`, true);
+  tempFiles.add(outputPath);
+
+  let formatArgs = [];
+  let vfArgs = [];
+  let outputArgs = [];
+
+  if (mediaType === 'image') {
+    const qVal = parseInt(quality) || 80;
+    outputArgs = ['-frames:v', '1'];
+    
+    switch (format) {
+      case 'webp': formatArgs = ['-c:v', 'libwebp', '-q:v', qVal.toString()]; break;
+      case 'jpg': 
+        const qscale = qVal === 100 ? 2 : (qVal >= 80 ? 5 : 15);
+        formatArgs = ['-q:v', qscale.toString()];
+        outputArgs.push('-update', '1');
+        break;
+      case 'png': 
+        const compressionLevel = qVal === 100 ? 9 : (qVal >= 80 ? 6 : 3);
+        formatArgs = ['-compression_level', compressionLevel.toString()];
+        outputArgs.push('-update', '1');
+        break;
+      default: formatArgs = ['-q:v', '5'];
+    }
+
+    const args = ['-hwaccel', 'auto', '-i', inputPath, ...formatArgs, ...outputArgs, '-y', outputPath];
+    await runFFmpeg(args, event, jobId);
+    return outputPath;
+  }
+
+  // 🚀 Parallel Chunk Engine for Video
+  event.sender.send('ffmpeg:log', { jobId, msg: `💎 Initializing Parallel Chunk Engine...` });
+  
+  const chunkDir = path.join(BASE_TEMP_DIR, `chunks_${jobId}`);
+  if (!fs.existsSync(chunkDir)) fs.mkdirSync(chunkDir, { recursive: true });
+
+  try {
+    // 1. Split into 10s segments
+    event.sender.send('ffmpeg:log', { jobId, msg: `📦 Splitting video into high-speed segments...` });
+    const splitArgs = [
+      '-i', inputPath,
+      '-c', 'copy',
+      '-map', '0',
+      '-f', 'segment',
+      '-segment_time', '10',
+      '-reset_timestamps', '1',
+      path.join(chunkDir, 'seg_%03d.mp4')
+    ];
+    const totalDuration = await runFFmpeg(splitArgs, event, jobId);
+
+    // 2. Identify segments
+    const segments = fs.readdirSync(chunkDir).filter(f => f.startsWith('seg_')).sort();
+    event.sender.send('ffmpeg:log', { jobId, msg: `🔧 Detected ${segments.length} segments. Starting parallel transcode...` });
+
+    // 3. Prepare Transcode Args
+    vfArgs = ['-vf', `scale=-2:${quality},format=yuv420p`];
+    if (useGpu && bestHwEncoder) {
+      formatArgs = ['-c:v', bestHwEncoder];
+      if (bestHwEncoder === 'h264_nvenc') {
+        formatArgs.push('-preset', 'p1', '-rc', 'vbr', '-cq', '28', '-tune', 'ull', '-zerolatency', '1');
+      } else if (bestHwEncoder === 'h264_amf') {
+        formatArgs.push('-quality', 'speed', '-rc', 'vbr_latency');
+      } else if (bestHwEncoder === 'h264_qsv') {
+        formatArgs.push('-preset', 'veryfast', '-global_quality', '28');
+      } else if (bestHwEncoder === 'h264_vulkan') {
+        formatArgs.push('-preset', 'ultrafast');
+      } else if (bestHwEncoder === 'h264_mf') {
+        formatArgs.push('-rate_control_mode', '1', '-bitrate', '3000000');
+      }
+      formatArgs.push('-c:a', 'aac', '-b:a', '128k');
+    } else {
+      formatArgs = ['-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '28', '-c:a', 'aac', '-b:a', '128k'];
+    }
+
+    // 4. Parallel Process (Limit concurrency to 3 to saturate GPU without overloading)
+    const CONCURRENCY = 3;
+    let completed = 0;
+    
+    for (let i = 0; i < segments.length; i += CONCURRENCY) {
+      const batch = segments.slice(i, i + CONCURRENCY);
+      await Promise.all(batch.map(async (seg) => {
+        const segInput = path.join(chunkDir, seg);
+        const segOutput = path.join(chunkDir, `out_${seg}`);
+        const args = ['-hwaccel', 'auto', '-i', segInput, ...vfArgs, ...formatArgs, '-y', segOutput];
+        await runFFmpeg(args, event, jobId, totalDuration / segments.length); // Rough progress estimation
+        completed++;
+        const totalPct = Math.round((completed / segments.length) * 100);
+        event.sender.send('ffmpeg:progress', { jobId, pct: totalPct });
+      }));
+    }
+
+    // 5. Merge segments
+    event.sender.send('ffmpeg:log', { jobId, msg: `🔗 Merging segments into final stream...` });
+    const concatListPath = path.join(chunkDir, 'list.txt');
+    const concatList = segments.map(seg => `file 'out_${seg}'`).join('\n');
+    fs.writeFileSync(concatListPath, concatList);
+
+    const mergeArgs = [
+      '-f', 'concat',
+      '-safe', '0',
+      '-i', concatListPath,
+      '-c', 'copy',
+      '-y', outputPath
+    ];
+    await runFFmpeg(mergeArgs, event, jobId);
+
+    // 6. Cleanup
+    event.sender.send('ffmpeg:log', { jobId, msg: `🧹 Cleaning up chunk workspace...` });
+    try {
+      const files = fs.readdirSync(chunkDir);
+      for (const f of files) fs.unlinkSync(path.join(chunkDir, f));
+      fs.rmdirSync(chunkDir);
+    } catch (e) { console.error('Cleanup failed', e); }
+
+    return outputPath;
+  } catch (err) {
+    event.sender.send('ffmpeg:log', { jobId, msg: `❌ CRITICAL ERROR: ${err.message}` });
+    throw err;
+  }
 });

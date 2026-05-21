@@ -41,12 +41,19 @@ const app = {
         const label = document.getElementById('detectedHwLabel');
         if (display && label) {
           display.style.display = 'flex';
-          label.textContent = info.label || 'None (Software Only)';
+          const modelStr = info.model ? ` on ${info.model}` : '';
+          label.textContent = (info.label || 'None (Software Only)') + modelStr;
           if (!info.encoder) {
             label.style.color = 'var(--text-muted)';
           } else {
             label.style.color = 'var(--amber)';
             label.style.fontWeight = '800';
+            // Auto-enable GPU if detected
+            const gpuCheck = document.getElementById('srvGpu');
+            if (gpuCheck) {
+              gpuCheck.checked = true;
+              this.updateProviderServices();
+            }
           }
         }
       });
