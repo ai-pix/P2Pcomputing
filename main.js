@@ -475,27 +475,32 @@ ipcMain.handle('ffmpeg:transcode', async (event, jobId, inputPath, format, quali
     event.sender.send('ffmpeg:log', { jobId, msg: `🔧 Detected ${segments.length} segments. Starting parallel transcode...` });
 
     // 3. Prepare Transcode Args
+    let hwaccelArgs = ['-hwaccel', 'auto'];
     vfArgs = ['-vf', `scale=-2:${quality},format=yuv420p`];
+
     if (useGpu && bestHwEncoder) {
-      formatArgs = ['-c:v', bestHwEncoder];
       if (bestHwEncoder === 'h264_nvenc') {
-        formatArgs.push('-preset', 'p1', '-rc', 'vbr', '-cq', '28', '-tune', 'ull', '-zerolatency', '1');
-      } else if (bestHwEncoder === 'h264_amf') {
-        formatArgs.push('-quality', 'speed', '-rc', 'vbr_latency');
+        hwaccelArgs = ['-hwaccel', 'cuda', '-hwaccel_output_format', 'cuda'];
+        vfArgs = ['-vf', `scale_cuda=-2:${quality}`];
+        formatArgs = ['-c:v', 'h264_nvenc', '-preset', 'p1', '-rc', 'vbr', '-cq', '28', '-tune', 'ull', '-zerolatency', '1'];
       } else if (bestHwEncoder === 'h264_qsv') {
-        formatArgs.push('-preset', 'veryfast', '-global_quality', '28');
+        hwaccelArgs = ['-hwaccel', 'qsv', '-hwaccel_output_format', 'qsv'];
+        vfArgs = ['-vf', `scale_qsv=-2:${quality}`];
+        formatArgs = ['-c:v', 'h264_qsv', '-preset', 'veryfast', '-global_quality', '28'];
+      } else if (bestHwEncoder === 'h264_amf') {
+        formatArgs = ['-c:v', 'h264_amf', '-quality', 'speed', '-rc', 'vbr_latency'];
       } else if (bestHwEncoder === 'h264_vulkan') {
-        formatArgs.push('-preset', 'ultrafast');
+        formatArgs = ['-c:v', 'h264_vulkan', '-preset', 'ultrafast'];
       } else if (bestHwEncoder === 'h264_mf') {
-        formatArgs.push('-rate_control_mode', '1', '-bitrate', '3000000');
+        formatArgs = ['-c:v', 'h264_mf', '-rate_control_mode', '1', '-bitrate', '3000000'];
       }
       formatArgs.push('-c:a', 'aac', '-b:a', '128k');
     } else {
       formatArgs = ['-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '28', '-c:a', 'aac', '-b:a', '128k'];
     }
 
-    // 4. Parallel Process (Limit concurrency to 3 to saturate GPU without overloading)
-    const CONCURRENCY = 3;
+    // 4. Parallel Process (Increase concurrency for modern GPUs)
+    const CONCURRENCY = (bestHwEncoder === 'h264_nvenc') ? 4 : 2;
     let completed = 0;
     
     for (let i = 0; i < segments.length; i += CONCURRENCY) {
@@ -503,8 +508,17 @@ ipcMain.handle('ffmpeg:transcode', async (event, jobId, inputPath, format, quali
       await Promise.all(batch.map(async (seg) => {
         const segInput = path.join(chunkDir, seg);
         const segOutput = path.join(chunkDir, `out_${seg}`);
-        const args = ['-hwaccel', 'auto', '-i', segInput, ...vfArgs, ...formatArgs, '-y', segOutput];
-        await runFFmpeg(args, event, jobId, totalDuration / segments.length); // Rough progress estimation
+        const args = [...hwaccelArgs, '-i', segInput, ...vfArgs, ...formatArgs, '-y', segOutput];
+        
+        try {
+          await runFFmpeg(args, event, jobId, totalDuration / segments.length);
+        } catch (e) {
+          // Fallback if hardware scaler fails (common with some drivers/formats)
+          event.sender.send('ffmpeg:log', { jobId, msg: `⚠️ HW Scaler failed, falling back to software filter for segment ${seg}` });
+          const fallbackArgs = ['-hwaccel', 'auto', '-i', segInput, '-vf', `scale=-2:${quality},format=yuv420p`, ...formatArgs, '-y', segOutput];
+          await runFFmpeg(fallbackArgs, event, jobId, totalDuration / segments.length);
+        }
+        
         completed++;
         const totalPct = Math.round((completed / segments.length) * 100);
         event.sender.send('ffmpeg:progress', { jobId, pct: totalPct });
