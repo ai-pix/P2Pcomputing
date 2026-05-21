@@ -152,6 +152,7 @@ function getSafePath(jobId, fileName, isOutput = false) {
 }
 
 let bestHwEncoder = null;
+let bestHwLabel = 'None (Software Only)';
 
 async function detectHardwareAcceleration() {
   return new Promise((resolve) => {
@@ -173,6 +174,7 @@ async function detectHardwareAcceleration() {
       for (const enc of encodersToTry) {
         if (output.includes(enc.name)) {
           bestHwEncoder = enc.name;
+          bestHwLabel = enc.label;
           console.log(`🚀 Hardware Acceleration Detected: ${enc.label} (${enc.name})`);
           break;
         }
@@ -248,6 +250,12 @@ ipcMain.handle('win:close', () => {
 ipcMain.handle('notification:send', (event, title, message) => {
   showTrayNotification(title, message);
 });
+
+/* ─── IPC Handler for Hardware Info ─── */
+ipcMain.handle('ffmpeg:getHwInfo', () => ({
+  encoder: bestHwEncoder,
+  label: bestHwLabel
+}));
 
 /* ─── IPC Handlers for Auto-Updater ─── */
 ipcMain.handle('update:download', () => {

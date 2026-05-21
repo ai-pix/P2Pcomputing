@@ -13,6 +13,7 @@ contextBridge.exposeInMainWorld('api', {
 
   // FFmpeg
   transcode: (jobId, inputPath, format, quality, mediaType, useGpu = false) => ipcRenderer.invoke('ffmpeg:transcode', jobId, inputPath, format, quality, mediaType, useGpu),
+  getHwInfo: () => ipcRenderer.invoke('ffmpeg:getHwInfo'),
   onTranscodeProgress: (callback) => {
     const handler = (e, data) => callback(data);
     ipcRenderer.on('ffmpeg:progress', handler);

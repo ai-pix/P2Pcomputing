@@ -34,6 +34,22 @@ const app = {
       window.api.onUpdateDownloaded((data) => {
         this._showUpdateCard('downloaded', data.version);
       });
+
+      // Fetch and display hardware info
+      window.api.getHwInfo().then(info => {
+        const display = document.getElementById('hwInfoDisplay');
+        const label = document.getElementById('detectedHwLabel');
+        if (display && label) {
+          display.style.display = 'flex';
+          label.textContent = info.label || 'None (Software Only)';
+          if (!info.encoder) {
+            label.style.color = 'var(--text-muted)';
+          } else {
+            label.style.color = 'var(--amber)';
+            label.style.fontWeight = '800';
+          }
+        }
+      });
     } else {
       // Hide Share Compute in web version
       const navShareCompute = document.getElementById('navShareCompute');
