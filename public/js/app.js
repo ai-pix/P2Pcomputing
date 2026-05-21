@@ -41,6 +41,9 @@ const app = {
       
       const viewProvider = document.getElementById('viewProvider');
       if (viewProvider) viewProvider.style.display = 'none';
+
+      const gpuToggle = document.getElementById('gpuToggleLabel');
+      if (gpuToggle) gpuToggle.style.display = 'none';
     }
     signaling.connect();
     signaling.on('welcome', (msg) => {
@@ -419,7 +422,8 @@ const app = {
           });
 
           // fileData is the temp file path
-          resultData = await window.api.transcode(this.currentJobId, fileData, meta.format, meta.quality, meta.mediaType);
+          const useGpu = document.getElementById('srvGpu')?.checked || false;
+          resultData = await window.api.transcode(this.currentJobId, fileData, meta.format, meta.quality, meta.mediaType, useGpu);
         } else {
           throw new Error('Native IPC bridge not available. Please run in Electron.');
         }
@@ -649,6 +653,7 @@ const app = {
     const services = [];
     if (document.getElementById('srvVideo')?.checked) services.push('video');
     if (document.getElementById('srvImage')?.checked) services.push('image');
+    if (document.getElementById('srvGpu')?.checked) services.push('gpu');
     return services;
   },
 

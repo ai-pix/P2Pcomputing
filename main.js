@@ -151,8 +151,40 @@ function getSafePath(jobId, fileName, isOutput = false) {
   return finalPath;
 }
 
-app.whenReady().then(() => {
+let bestHwEncoder = null;
+
+async function detectHardwareAcceleration() {
+  return new Promise((resolve) => {
+    const encodersToTry = [
+      { name: 'h264_nvenc', label: 'NVIDIA NVENC' },
+      { name: 'h264_amf', label: 'AMD AMF' },
+      { name: 'h264_qsv', label: 'Intel QuickSync' },
+      { name: 'h264_vulkan', label: 'Vulkan/TPU Accelerator' },
+      { name: 'h264_mf', label: 'Windows Media Foundation' },
+      { name: 'h264_vaapi', label: 'Generic VAAPI' }
+    ];
+
+    const args = ['-encoders'];
+    const ffmpegProc = spawn(ffmpegPath, args);
+    let output = '';
+
+    ffmpegProc.stdout.on('data', (data) => output += data.toString());
+    ffmpegProc.on('close', () => {
+      for (const enc of encodersToTry) {
+        if (output.includes(enc.name)) {
+          bestHwEncoder = enc.name;
+          console.log(`🚀 Hardware Acceleration Detected: ${enc.label} (${enc.name})`);
+          break;
+        }
+      }
+      resolve(bestHwEncoder);
+    });
+  });
+}
+
+app.whenReady().then(async () => {
   cleanupTempFiles(); // Clean up old files on startup
+  await detectHardwareAcceleration();
   createWindow();
   createTray();
 
@@ -325,7 +357,7 @@ ipcMain.handle('fs:saveOutputFile', async (event, filePath, defaultName = 'outpu
 });
 
 /* ─── IPC Handler for Native FFmpeg ─── */
-ipcMain.handle('ffmpeg:transcode', (event, jobId, inputPath, format, quality, mediaType = 'video') => {
+ipcMain.handle('ffmpeg:transcode', (event, jobId, inputPath, format, quality, mediaType = 'video', useGpu = false) => {
   return new Promise((resolve, reject) => {
     if (!inputPath.startsWith(BASE_TEMP_DIR)) {
       return reject(new Error('Access denied: Input file outside sandbox'));
@@ -363,11 +395,48 @@ ipcMain.handle('ffmpeg:transcode', (event, jobId, inputPath, format, quality, me
       vfArgs = ['-vf', `scale=-2:${quality}`];
       
       switch (format) {
-        case 'mp4': formatArgs = ['-c:v', 'libx264', '-preset', 'fast', '-crf', '23', '-c:a', 'aac', '-b:a', '128k']; break;
-        case 'webm': formatArgs = ['-c:v', 'libvpx-vp9', '-crf', '30', '-b:v', '0', '-c:a', 'libopus']; break;
-        case 'avi': formatArgs = ['-c:v', 'mpeg4', '-q:v', '5', '-c:a', 'mp3']; break;
-        case 'mkv': formatArgs = ['-c:v', 'libx264', '-preset', 'fast', '-crf', '23', '-c:a', 'aac']; break;
-        default: formatArgs = ['-c:v', 'libx264', '-preset', 'fast', '-crf', '23'];
+        case 'mp4': 
+          if (useGpu && bestHwEncoder) {
+            // Use the best detected hardware encoder
+            formatArgs = ['-c:v', bestHwEncoder];
+            
+            // Add encoder-specific tuning
+            if (bestHwEncoder === 'h264_nvenc') {
+              formatArgs.push('-preset', 'p4', '-rc', 'vbr', '-cq', '23');
+            } else if (bestHwEncoder === 'h264_amf') {
+              formatArgs.push('-quality', 'speed', '-rc', 'vbr_latency');
+            } else if (bestHwEncoder === 'h264_qsv') {
+              formatArgs.push('-preset', 'fast', '-global_quality', '23');
+            } else if (bestHwEncoder === 'h264_vulkan') {
+              formatArgs.push('-preset', 'fast');
+            } else if (bestHwEncoder === 'h264_mf') {
+              formatArgs.push('-rate_control_mode', '1', '-bitrate', '2000000');
+            }
+            
+            formatArgs.push('-c:a', 'aac', '-b:a', '128k');
+          } else {
+            formatArgs = ['-c:v', 'libx264', '-preset', 'fast', '-crf', '23', '-c:a', 'aac', '-b:a', '128k'];
+          }
+          break;
+        case 'webm': 
+          formatArgs = ['-c:v', 'libvpx-vp9', '-crf', '30', '-b:v', '0', '-c:a', 'libopus']; 
+          break;
+        case 'avi': 
+          formatArgs = ['-c:v', 'mpeg4', '-q:v', '5', '-c:a', 'mp3']; 
+          break;
+        case 'mkv': 
+          if (useGpu && bestHwEncoder) {
+            formatArgs = ['-c:v', bestHwEncoder];
+            if (bestHwEncoder === 'h264_nvenc') {
+              formatArgs.push('-preset', 'p4', '-rc', 'vbr', '-cq', '23');
+            }
+            formatArgs.push('-c:a', 'aac');
+          } else {
+            formatArgs = ['-c:v', 'libx264', '-preset', 'fast', '-crf', '23', '-c:a', 'aac'];
+          }
+          break;
+        default: 
+          formatArgs = ['-c:v', 'libx264', '-preset', 'fast', '-crf', '23'];
       }
     }
 

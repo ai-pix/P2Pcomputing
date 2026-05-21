@@ -222,6 +222,10 @@
                   <input type="checkbox" id="srvImage" checked onchange="app.updateProviderServices()" style="accent-color: var(--emerald); width: 18px; height: 18px; cursor: pointer;">
                   📸 Photo Transcoding Module
                 </label>
+                <label id="gpuToggleLabel" style="display: flex; align-items: center; gap: 10px; cursor: pointer; font-size: 0.95rem; font-weight: 600; color: var(--amber); transition: color 0.2s;">
+                  <input type="checkbox" id="srvGpu" onchange="app.updateProviderServices()" style="accent-color: var(--amber); width: 18px; height: 18px; cursor: pointer;">
+                  🚀 GPU Acceleration (NVENC/AMF/QSV)
+                </label>
               </div>
             </div>
 

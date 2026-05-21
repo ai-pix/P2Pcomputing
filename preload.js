@@ -12,7 +12,7 @@ contextBridge.exposeInMainWorld('api', {
   saveOutputFile: (tempPath, defaultName) => ipcRenderer.invoke('fs:saveOutputFile', tempPath, defaultName),
 
   // FFmpeg
-  transcode: (jobId, inputPath, format, quality, mediaType) => ipcRenderer.invoke('ffmpeg:transcode', jobId, inputPath, format, quality, mediaType),
+  transcode: (jobId, inputPath, format, quality, mediaType, useGpu = false) => ipcRenderer.invoke('ffmpeg:transcode', jobId, inputPath, format, quality, mediaType, useGpu),
   onTranscodeProgress: (callback) => {
     const handler = (e, data) => callback(data);
     ipcRenderer.on('ffmpeg:progress', handler);
