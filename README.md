@@ -6,7 +6,7 @@ TranscodeNet is a decentralized, peer-to-peer (P2P) platform designed to distrib
 
 Get the latest alpha version of TranscodeNet:
 
-- **[Windows (v1.2.0-alpha.1)](https://github.com/ai-pix/P2Pcomputing/releases/download/v1.2.0-alpha.1/TranscodeNet.Setup.1.2.0-alpha.1.exe)**
+- **[Windows (v0.0.2-alpha)](https://github.com/ai-pix/P2Pcomputing/releases/download/v0.0.2-alpha/TranscodeNet-Setup-0.0.2-alpha.exe)**
 
 ## 🚀 Features
 
