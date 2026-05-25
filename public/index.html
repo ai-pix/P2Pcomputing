@@ -67,6 +67,11 @@
             <span class="peer-status-label">Node Ready</span>
           </div>
           <span id="clientPeerId" class="peer-id-val">peer-connecting...</span>
+          <div style="margin-top: 10px; display: flex; justify-content: space-between; font-size: 0.8rem; font-weight: 700; color: var(--text-secondary); background: rgba(5,150,105,0.05); padding: 6px 12px; border-radius: 6px; border: 1px solid var(--border);">
+            <span>💰 Balance:</span>
+            <span id="accountBalanceVal" style="color: var(--emerald);">100.0 pts</span>
+          </div>
+          <button class="btn btn-secondary btn-xs" id="addCreditsBtn" onclick="app.addTestCredits()" style="margin-top: 8px; width: 100%; font-size: 0.75rem; border-radius: 4px; padding: 4px;">+1000 Test Credits</button>
         </div>
       </div>
     </aside>
@@ -90,6 +95,10 @@
           <div class="header-stat-badge">
             <span class="badge-label">Total Jobs Done:</span>
             <span class="badge-val" id="navCompleted">0</span>
+          </div>
+          <div class="header-stat-badge">
+            <span class="badge-label">My Credits:</span>
+            <span class="badge-val" id="headerBalanceVal" style="color:var(--emerald); font-weight:800;">100.0</span>
           </div>
         </div>
       </header>
@@ -174,6 +183,11 @@
               <div id="hwInfoDisplay" style="margin-top: 12px; font-size: 0.85rem; color: var(--text-muted); display: none; align-items: center; gap: 8px;">
                 <span style="background: var(--amber); color: #000; padding: 2px 6px; border-radius: 4px; font-weight: 800; font-size: 0.7rem;">DETECTED</span>
                 <span id="detectedHwLabel">Scanning for hardware...</span>
+              </div>
+              <div id="benchmarkDisplay" style="margin-top: 8px; font-size: 0.85rem; color: var(--text-muted); display: flex; align-items: center; gap: 8px;">
+                <span style="background: var(--emerald); color: #fff; padding: 2px 6px; border-radius: 4px; font-weight: 800; font-size: 0.7rem;">BENCHMARK</span>
+                <span id="benchmarkScoreVal">Score: Pending Test</span>
+                <button id="runBenchmarkBtn" class="btn btn-secondary btn-sm" style="padding: 2px 8px; font-size: 0.7rem; border-radius: 4px;" onclick="app.runBenchmark()">Run Test</button>
               </div>
 
               <!-- Provider Policies -->

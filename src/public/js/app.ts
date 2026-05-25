@@ -1,46 +1,76 @@
 /* ─── Main App — State Management & Orchestration ─── */
+
+interface QueueItem {
+  id: string;
+  file: File;
+  mediaType: 'video' | 'image';
+  format: string;
+  quality: string;
+  status: string;
+  progress: number;
+  jobId: string | null;
+  providerId: string | null;
+  resultBlob: Blob | null;
+  resultMeta: any | null;
+  resultIsNative: boolean;
+  error: string | null;
+  frameCount: number;
+  width: number;
+  height: number;
+  estimatedCost: number;
+}
+
 const app = {
-  role: null,        // 'client' | 'provider'
-  queue: [],         // batch queue of files to process
-  peers: new Map(),  // remoteProviderId -> PeerConnection
-  activeQueueItem: null, // active item in the queue
-  currentJobId: null,
-  pendingJobId: null,
-  peer: null,        // current/fallback PeerConnection
-  resultBlob: null,
-  resultMeta: null,
+  role: null as 'client' | 'provider' | null,
+  queue: [] as QueueItem[],
+  peers: new Map<string, any>(), // remoteProviderId -> PeerConnection
+  activeQueueItem: null as QueueItem | null,
+  currentJobId: null as string | null,
+  pendingJobId: null as string | null,
+  peer: null as any | null, // current/fallback PeerConnection
+  resultBlob: null as Blob | null,
+  resultMeta: null as any | null,
   resultIsNative: false,
-  historyData: [],   // cached history from server
-  jobLogs: [],       // logs collected during current job
-  ffmpegLogUnsubscribe: null,
-  ffmpegProgressUnsubscribe: null,
+  historyData: [] as any[],
+  jobLogs: [] as { time: number; msg: string }[],
+  ffmpegLogUnsubscribe: null as (() => void) | null,
+  ffmpegProgressUnsubscribe: null as (() => void) | null,
 
   /* Provider state */
   providerOnline: false,
   provJobsDone: 0,
   provDataProcessed: 0,
-  provStartTime: null,
-  uptimeInterval: null,
-  statsInterval: null,
-  lastSystemStats: null,
+  provStartTime: null as number | null,
+  uptimeInterval: null as any,
+  statsInterval: null as any,
+  lastSystemStats: null as any,
+
+  identity: null as { nodeId: string; nodeSecret: string } | null,
+  pointsBalance: 100.0,
+  benchmarkScore: 0,
+  _pendingUpdateVersion: null as string | null,
 
   /* ─── Init ─── */
   init() {
     this.role = 'client';
-    if (window.api) {
+    this.identity = null;
+    this.pointsBalance = 100.0;
+    this.benchmarkScore = 0;
+    
+    if ((window as any).api) {
       document.body.classList.add('is-electron');
 
       // Listen for auto-updater events
-      window.api.onUpdateAvailable((data) => {
+      (window as any).api.onUpdateAvailable((data: any) => {
         this._pendingUpdateVersion = data.version;
         this._showUpdateCard('available', data.version);
       });
-      window.api.onUpdateDownloaded((data) => {
+      (window as any).api.onUpdateDownloaded((data: any) => {
         this._showUpdateCard('downloaded', data.version);
       });
 
       // Fetch and display hardware info
-      window.api.getHwInfo().then(info => {
+      (window as any).api.getHwInfo().then((info: any) => {
         const display = document.getElementById('hwInfoDisplay');
         const label = document.getElementById('detectedHwLabel');
         if (display && label) {
@@ -48,12 +78,12 @@ const app = {
           const modelStr = info.model ? ` on ${info.model}` : '';
           label.textContent = (info.label || 'None (Software Only)') + modelStr;
           if (!info.encoder) {
-            label.style.color = 'var(--text-muted)';
+            (label as HTMLElement).style.color = 'var(--text-muted)';
           } else {
-            label.style.color = 'var(--amber)';
-            label.style.fontWeight = '800';
+            (label as HTMLElement).style.color = 'var(--amber)';
+            (label as HTMLElement).style.fontWeight = '800';
             // Auto-enable GPU if detected
-            const gpuCheck = document.getElementById('srvGpu');
+            const gpuCheck = document.getElementById('srvGpu') as HTMLInputElement | null;
             if (gpuCheck) {
               gpuCheck.checked = true;
               this.updateProviderServices();
@@ -73,14 +103,36 @@ const app = {
       if (gpuToggle) gpuToggle.style.display = 'none';
     }
     signaling.connect();
-    signaling.on('welcome', (msg) => {
+    signaling.on('welcome', (msg: any) => {
       UI.updateStats(msg.stats);
       UI.setText('clientPeerId', signaling.peerId || 'Offline');
+      this.syncIdentity();
     });
-    signaling.on('stats', (msg) => UI.updateStats(msg));
+    signaling.on('stats', (msg: any) => UI.updateStats(msg));
+    
+    signaling.on('registered', (msg: any) => {
+      if (msg.account) {
+        this.updateBalanceUI(msg.account.points);
+      }
+    });
+
+    signaling.on('balance-update', (msg: any) => {
+      this.updateBalanceUI(msg.points);
+    });
+
+    signaling.on('error', (msg: any) => {
+      UI.toast(msg.message, 'error');
+      if (this.activeQueueItem && msg.message.includes('Insufficient')) {
+        this.activeQueueItem.status = 'failed';
+        this.activeQueueItem.error = msg.message;
+        this.renderQueue();
+        this.activeQueueItem = null;
+        this.processQueue();
+      }
+    });
 
     /* ── Client events ── */
-    signaling.on('job-created', (msg) => {
+    signaling.on('job-created', (msg: any) => {
       this.currentJobId = msg.jobId;
       if (this.activeQueueItem) {
         this.activeQueueItem.jobId = msg.jobId;
@@ -89,7 +141,7 @@ const app = {
       }
     });
 
-    signaling.on('job-matched', (msg) => {
+    signaling.on('job-matched', (msg: any) => {
       const item = this.queue.find(q => q.jobId === msg.jobId || (this.activeQueueItem && this.activeQueueItem.jobId === msg.jobId));
       if (!item) return;
 
@@ -100,10 +152,9 @@ const app = {
       UI.toast(`Provider found for ${item.file.name}! Establishing P2P connection...`, 'success');
       this.notifyUser('Provider Found', `Establishing P2P connection to process ${item.file.name}...`);
 
-      // Create WebRTC connection as initiator
       const peer = new PeerConnection(msg.jobId);
       this.peers.set(msg.providerId, peer);
-      this.peer = peer; // Fallback reference
+      this.peer = peer;
 
       peer.onConnected = () => {
         item.status = 'uploading';
@@ -112,7 +163,7 @@ const app = {
         this._sendFileToProvider(item, peer);
       };
       
-      peer.onProgress = (stage, pct) => {
+      peer.onProgress = (stage: string, pct: number) => {
         if (stage === 'sending') {
           item.status = 'uploading';
           item.progress = pct;
@@ -126,7 +177,7 @@ const app = {
         this.renderQueue();
       };
       
-      peer.onFileReceived = async (resultData, meta, isNative) => {
+      peer.onFileReceived = async (resultData: any, meta: any, isNative: boolean) => {
         item.status = 'complete';
         item.progress = 100;
         item.resultBlob = resultData;
@@ -137,12 +188,10 @@ const app = {
         UI.toast(`Transcoding complete for ${item.file.name}! 🎉`, 'success');
         this.notifyUser('Transcoding Complete', `Finished transcoding output: ${meta.fileName}`);
 
-        // Cleanup WebRTC connection
         peer.close();
         this.peers.delete(msg.providerId);
         if (this.peer === peer) this.peer = null;
 
-        // Process next item in the queue
         this.activeQueueItem = null;
         this.processQueue();
       };
@@ -150,7 +199,7 @@ const app = {
       peer.createOffer(msg.providerId);
     });
 
-    signaling.on('job-progress', (msg) => {
+    signaling.on('job-progress', (msg: any) => {
       const item = this.queue.find(q => q.jobId === msg.jobId);
       if (item && msg.stage === 'transcoding') {
         item.status = 'transcoding';
@@ -159,7 +208,7 @@ const app = {
       }
     });
 
-    signaling.on('job-failed', (msg) => {
+    signaling.on('job-failed', (msg: any) => {
       const item = this.queue.find(q => q.jobId === msg.jobId);
       if (item) {
         item.status = 'failed';
@@ -182,27 +231,24 @@ const app = {
     });
 
     /* ── Provider events ── */
-    signaling.on('job-available', (msg) => {
+    signaling.on('job-available', (msg: any) => {
       if (this.role !== 'provider' || !this.providerOnline) return;
 
       const s = msg.settings;
-      const maxFileSizeMB = parseFloat(document.getElementById('srvMaxFileSize').value);
+      const maxFileSizeMB = parseFloat((document.getElementById('srvMaxFileSize') as HTMLInputElement).value);
       const maxFileSizeBytes = maxFileSizeMB * 1024 * 1024;
-      const cpuLimit = parseFloat(document.getElementById('srvCpuLimit').value);
+      const cpuLimit = parseFloat((document.getElementById('srvCpuLimit') as HTMLInputElement).value);
 
-      // Check CPU utilization policy
       let cpuPass = true;
       if (this.lastSystemStats && this.lastSystemStats.cpu > cpuLimit) {
         cpuPass = false;
       }
 
-      // Check size policy
       let sizePass = true;
       if (s.fileSize > maxFileSizeBytes) {
         sizePass = false;
       }
 
-      // Update UI policy badges
       const cpuBadge = document.getElementById('policyCpuBadge');
       if (cpuBadge) {
         if (cpuPass) {
@@ -225,7 +271,6 @@ const app = {
         }
       }
 
-      // Automatically reject (ignore) if policies are not compliant
       if (!cpuPass || !sizePass) {
         console.log(`Decline job ${msg.jobId}: CPU pass=${cpuPass}, Size pass=${sizePass}`);
         return;
@@ -233,8 +278,7 @@ const app = {
 
       this.pendingJobId = msg.jobId;
 
-      // Auto-Accept verification check
-      const autoAccept = document.getElementById('srvAutoAccept').checked;
+      const autoAccept = (document.getElementById('srvAutoAccept') as HTMLInputElement).checked;
       if (autoAccept) {
         console.log(`Auto-accepting job ${msg.jobId}`);
         UI.toast(`Auto-accepting job ${msg.jobId}...`, 'info');
@@ -254,7 +298,7 @@ const app = {
       this.pendingJobId = null;
     });
 
-    signaling.on('job-accepted', (msg) => {
+    signaling.on('job-accepted', (msg: any) => {
       UI.hide('jobNotification');
       UI.show('processingView');
       UI.setText('provJobId', msg.jobId);
@@ -267,15 +311,15 @@ const app = {
     });
 
     /* ── WebRTC signaling relay ── */
-    signaling.on('offer', async (msg) => {
+    signaling.on('offer', async (msg: any) => {
       if (this.role === 'provider') {
-        this.peer = new PeerConnection(this.currentJobId);
+        this.peer = new PeerConnection(this.currentJobId || undefined);
         this._setupProviderPeer();
         await this.peer.handleOffer(msg);
       }
     });
 
-    signaling.on('answer', async (msg) => {
+    signaling.on('answer', async (msg: any) => {
       if (this.role === 'client') {
         const peer = this.peers.get(msg.from);
         if (peer) await peer.handleAnswer(msg);
@@ -284,7 +328,7 @@ const app = {
       }
     });
 
-    signaling.on('ice-candidate', async (msg) => {
+    signaling.on('ice-candidate', async (msg: any) => {
       if (this.role === 'client') {
         const peer = this.peers.get(msg.from);
         if (peer) await peer.handleIceCandidate(msg);
@@ -297,25 +341,135 @@ const app = {
     UI.setupDragDrop('uploadZone', 'fileInput', (files) => this._handleFile(files));
   },
 
+  /* ─── Identity & Benchmark Management ─── */
+  async syncIdentity() {
+    if ((window as any).api) {
+      this.identity = await (window as any).api.getNodeIdentity();
+    } else {
+      let nodeId = localStorage.getItem('transcodenet_node_id');
+      let nodeSecret = localStorage.getItem('transcodenet_node_secret');
+      if (!nodeId || !nodeSecret) {
+        nodeId = 'web-' + Math.random().toString(36).substr(2, 9);
+        nodeSecret = Math.random().toString(36).substr(2, 9);
+        localStorage.setItem('transcodenet_node_id', nodeId);
+        localStorage.setItem('transcodenet_node_secret', nodeSecret);
+      }
+      this.identity = { nodeId, nodeSecret };
+    }
+    
+    let score = 0;
+    const savedScore = localStorage.getItem('transcodenet_benchmark_score');
+    if (savedScore) {
+      score = parseInt(savedScore) || 0;
+      this.benchmarkScore = score;
+      UI.setText('benchmarkScoreVal', `Score: ${score}`);
+      const btn = document.getElementById('runBenchmarkBtn');
+      if (btn) btn.textContent = 'Re-Run';
+    } else if ((window as any).api) {
+      setTimeout(() => this.runBenchmark(true), 2000);
+    }
+    
+    if (this.identity) {
+      signaling.send({
+        type: 'register-identity',
+        nodeId: this.identity.nodeId,
+        nodeSecret: this.identity.nodeSecret,
+        role: this.role,
+        services: this.getProviderServices(),
+        benchmarkScore: score,
+        status: this.role === 'provider' ? (this.providerOnline ? 'online' : 'offline') : undefined
+      });
+    }
+  },
+
+  async runBenchmark(isAuto = false) {
+    if (!(window as any).api) return;
+    
+    const useGpu = (document.getElementById('srvGpu') as HTMLInputElement | null)?.checked || false;
+    UI.setText('benchmarkScoreVal', 'Running transcode benchmark...');
+    const btn = document.getElementById('runBenchmarkBtn') as HTMLButtonElement | null;
+    if (btn) btn.disabled = true;
+    
+    try {
+      const score = await (window as any).api.runBenchmark(useGpu);
+      this.benchmarkScore = score;
+      localStorage.setItem('transcodenet_benchmark_score', String(score));
+      UI.setText('benchmarkScoreVal', `Score: ${score} FPS`);
+      UI.toast(`Benchmark completed! Speed: ${score} FPS`, 'success');
+      
+      if (signaling.peerId && this.identity) {
+        signaling.send({
+          type: 'register-identity',
+          nodeId: this.identity.nodeId,
+          nodeSecret: this.identity.nodeSecret,
+          role: this.role,
+          services: this.getProviderServices(),
+          benchmarkScore: score,
+          status: this.role === 'provider' ? (this.providerOnline ? 'online' : 'offline') : undefined
+        });
+      }
+    } catch (e) {
+      console.error('Benchmark failed:', e);
+      UI.setText('benchmarkScoreVal', 'Benchmark failed');
+    } finally {
+      if (btn) {
+        btn.disabled = false;
+        btn.textContent = 'Re-Run';
+      }
+    }
+  },
+
+  updateBalanceUI(points: number) {
+    this.pointsBalance = points;
+    const rounded = (points || 0).toFixed(1);
+    UI.setText('accountBalanceVal', `${rounded} pts`);
+    UI.setText('headerBalanceVal', rounded);
+  },
+  
+  addTestCredits() {
+    signaling.send({ type: 'add-test-credits' });
+    UI.toast('Requesting 1000 test credits...', 'info');
+  },
+
   /* ─── Navigation ─── */
-  switchTab(tabId, btnEl) {
+  switchTab(tabId: string, btnEl?: HTMLElement) {
     document.querySelectorAll('.tab-view').forEach(v => v.classList.remove('active'));
-    document.getElementById(tabId).classList.add('active');
+    document.getElementById(tabId)?.classList.add('active');
 
     document.querySelectorAll('.nav-item').forEach(btn => btn.classList.remove('active'));
     if (btnEl) btnEl.classList.add('active');
 
     const viewTitle = document.getElementById('viewTitle');
     const viewSubtitle = document.getElementById('viewSubtitle');
+    if (!viewTitle || !viewSubtitle) return;
+
     if (tabId === 'viewClient') {
       this.role = 'client';
       viewTitle.textContent = 'Transcode Media';
       viewSubtitle.textContent = 'Decentralized P2P transcoding engine';
+      if (this.identity) {
+        signaling.send({
+          type: 'register-identity',
+          nodeId: this.identity.nodeId,
+          nodeSecret: this.identity.nodeSecret,
+          role: 'client'
+        });
+      }
     } else if (tabId === 'viewProvider') {
       this.role = 'provider';
       viewTitle.textContent = 'Share Compute';
       viewSubtitle.textContent = 'Host worker nodes and receive encoding jobs';
-      signaling.send({ type: 'register-provider', services: this.getProviderServices() });
+      if (this.identity) {
+        signaling.send({
+          type: 'register-identity',
+          nodeId: this.identity.nodeId,
+          nodeSecret: this.identity.nodeSecret,
+          role: 'provider',
+          services: this.getProviderServices(),
+          benchmarkScore: this.benchmarkScore || 0,
+          status: this.providerOnline ? 'online' : 'offline'
+        });
+      }
       UI.toast('Registered as compute provider', 'success');
     } else if (tabId === 'viewHistory') {
       viewTitle.textContent = 'Job History';
@@ -325,11 +479,13 @@ const app = {
   },
 
   /* ─── Client: Batch queue management ─── */
-  _handleFile(files) {
+  _handleFile(files: FileList) {
     if (!files || !files.length) return;
     
     let addedCount = 0;
     const MAX_SIZE = 500 * 1024 * 1024;
+    const videoExtensions = ['.mp4', '.webm', '.avi', '.mkv', '.mov', '.ogg'];
+    const imageExtensions = ['.webp', '.jpg', '.jpeg', '.png', '.gif'];
 
     for (let i = 0; i < files.length; i++) {
       const file = files[i];
@@ -338,8 +494,9 @@ const app = {
         continue;
       }
       
-      const isVideo = file.type.startsWith('video/');
-      const isImage = file.type.startsWith('image/');
+      const ext = '.' + file.name.split('.').pop()!.toLowerCase();
+      const isVideo = file.type.startsWith('video/') || videoExtensions.includes(ext);
+      const isImage = file.type.startsWith('image/') || imageExtensions.includes(ext);
       
       if (!isVideo && !isImage) {
         UI.toast(`File "${file.name}" is not a supported media type.`, 'error');
@@ -350,7 +507,7 @@ const app = {
       const format = isVideo ? 'mp4' : 'webp';
       const quality = isVideo ? '1080' : '80';
 
-      this.queue.push({
+      const queueItem: QueueItem = {
         id: itemId,
         file: file,
         mediaType: isVideo ? 'video' : 'image',
@@ -363,27 +520,116 @@ const app = {
         resultBlob: null,
         resultMeta: null,
         resultIsNative: false,
-        error: null
-      });
+        error: null,
+        frameCount: 0,
+        width: 0,
+        height: 0,
+        estimatedCost: 0
+      };
 
+      this.queue.push(queueItem);
       addedCount++;
+
+      this.analyzeFileMetadata(queueItem);
     }
 
     if (addedCount > 0) {
       UI.toast(`Added ${addedCount} file(s) to queue`, 'success');
-      UI.show('queueCard');
+      UI.showEl('queueCard');
       this.renderQueue();
     }
   },
 
-  updateQueueItemConfig(id, key, value) {
-    const item = this.queue.find(q => q.id === id);
-    if (item && item.status === 'queued') {
-      item[key] = value;
+  async analyzeFileMetadata(item: QueueItem) {
+    try {
+      if (item.mediaType === 'image') {
+        const meta = await new Promise<{ width: number; height: number }>((resolve) => {
+          const img = new Image();
+          const timer = setTimeout(() => {
+            img.src = '';
+            resolve({ width: 0, height: 0 });
+          }, 1000);
+          img.src = URL.createObjectURL(item.file);
+          img.onload = () => {
+            clearTimeout(timer);
+            URL.revokeObjectURL(img.src);
+            resolve({ width: img.width || 0, height: img.height || 0 });
+          };
+          img.onerror = () => {
+            clearTimeout(timer);
+            resolve({ width: 0, height: 0 });
+          };
+        });
+        item.width = meta.width;
+        item.height = meta.height;
+      } else {
+        const meta = await new Promise<{ duration: number; width: number; height: number }>((resolve) => {
+          const video = document.createElement('video');
+          video.preload = 'metadata';
+          const timer = setTimeout(() => {
+            video.src = '';
+            resolve({ duration: 0, width: 0, height: 0 });
+          }, 1000);
+          video.src = URL.createObjectURL(item.file);
+          video.onloadedmetadata = () => {
+            clearTimeout(timer);
+            URL.revokeObjectURL(video.src);
+            resolve({ duration: video.duration || 0, width: video.videoWidth || 0, height: video.videoHeight || 0 });
+          };
+          video.onerror = () => {
+            clearTimeout(timer);
+            resolve({ duration: 0, width: 0, height: 0 });
+          };
+        });
+        item.width = meta.width;
+        item.height = meta.height;
+        item.frameCount = Math.round((meta.duration || 0) * 30);
+      }
+    } catch (e) {
+      console.error('Metadata parsing failed for queue item:', e);
+    }
+    this.recalculateItemCost(item);
+    this.renderQueue();
+  },
+
+  recalculateItemCost(item: QueueItem) {
+    const format = item.format;
+    const quality = item.quality;
+    
+    if (item.mediaType === 'image') {
+      if (item.width && item.height) {
+        const pixels = item.width * item.height;
+        const formatMult = format === 'png' ? 0.25 : 0.1;
+        item.estimatedCost = Math.round((pixels / 10000) * formatMult * 100) / 100;
+      } else {
+        item.estimatedCost = Math.round((item.file.size / (1024 * 1024)) * 5 * 100) / 100;
+      }
+    } else {
+      let frames = item.frameCount;
+      if (!frames) {
+        frames = Math.round((item.file.size / 102400) * 30);
+      }
+      
+      let resMult = 0.01;
+      if (quality === '360' || quality === '480') resMult = 0.005;
+      else if (quality === '720') resMult = 0.01;
+      else if (quality === '1080') resMult = 0.02;
+      else if (quality === '1440' || quality === '2160') resMult = 0.08;
+      
+      item.estimatedCost = Math.round(frames * resMult * 100) / 100;
     }
   },
 
-  removeQueueItem(id) {
+  updateQueueItemConfig(id: string, key: 'format' | 'quality', value: string) {
+    const item = this.queue.find(q => q.id === id);
+    if (item && item.status === 'queued') {
+      item[key] = value;
+      this.recalculateItemCost(item);
+      this.renderQueue();
+    }
+  },
+
+  removeQueueItem(id: string) {
     const idx = this.queue.findIndex(q => q.id === id);
     if (idx !== -1) {
       const item = this.queue[idx];
@@ -404,7 +650,7 @@ const app = {
     }
     this.queue = [];
     this.renderQueue();
-    UI.hide('queueCard');
+    UI.hideEl('queueCard');
   },
 
   startQueue() {
@@ -414,17 +660,23 @@ const app = {
   processQueue() {
     if (this.role !== 'client') return;
     
-    // Check if any job is currently processing/active
     const isBusy = this.queue.some(q => ['matching', 'connecting', 'uploading', 'transcoding', 'downloading'].includes(q.status));
     if (isBusy) {
       console.log('Queue is busy. Waiting for active job...');
       return;
     }
 
-    // Find first queued item
     const nextItem = this.queue.find(q => q.status === 'queued');
     if (!nextItem) {
       UI.toast('All queued jobs finished!', 'success');
+      return;
+    }
+
+    if (this.pointsBalance < nextItem.estimatedCost) {
+      UI.toast(`Insufficient credits! Job costs ~${nextItem.estimatedCost.toFixed(1)} points, but you only have ${this.pointsBalance.toFixed(1)} points. Host compute to earn credits!`, 'error');
+      nextItem.status = 'failed';
+      nextItem.error = 'Insufficient credits';
+      this.renderQueue();
       return;
     }
 
@@ -441,30 +693,36 @@ const app = {
         fileSize: nextItem.file.size,
         mediaType: nextItem.mediaType,
         format: nextItem.format,
-        quality: nextItem.quality
+        quality: nextItem.quality,
+        frameCount: nextItem.frameCount || 0,
+        width: nextItem.width || 0,
+        height: nextItem.height || 0
       }
     });
   },
 
   /* ─── Client: Send file to provider ─── */
-  async _sendFileToProvider(item, peer) {
+  async _sendFileToProvider(item: QueueItem, peer: any) {
     try {
       await peer.sendFile(item.file, {
         format: item.format,
         quality: item.quality,
-        mediaType: item.mediaType
+        mediaType: item.mediaType,
+        frameCount: item.frameCount || 0,
+        width: item.width || 0,
+        height: item.height || 0
       });
       item.status = 'transcoding';
       item.progress = 0;
       this.renderQueue();
-    } catch (e) {
+    } catch (e: any) {
       signaling.send({
         type: 'job-upload-failed',
         jobId: item.jobId || this.currentJobId,
         error: e.message
       });
       peer.close();
-      this.peers.delete(item.providerId);
+      this.peers.delete(item.providerId!);
       if (this.peer === peer) this.peer = null;
       
       item.status = 'failed';
@@ -478,7 +736,7 @@ const app = {
   },
 
   /* ─── Client: Download result ─── */
-  async downloadQueueItem(itemId) {
+  async downloadQueueItem(itemId: string) {
     const item = this.queue.find(q => q.id === itemId);
     if (!item || !item.resultBlob) return;
 
@@ -486,8 +744,8 @@ const app = {
     const baseName = item.file.name.replace(/\.[^.]+$/, '');
     const defaultName = item.resultMeta?.fileName || `${baseName}_transcoded.${format}`;
 
-    if (item.resultIsNative && window.api) {
-      const saveResult = await window.api.saveOutputFile(item.resultBlob, defaultName);
+    if (item.resultIsNative && (window as any).api) {
+      const saveResult = await (window as any).api.saveOutputFile(item.resultBlob, defaultName);
       if (!saveResult?.canceled) UI.toast('Output saved successfully', 'success');
       return;
     }
@@ -577,7 +835,10 @@ const app = {
           <span class="queue-item-icon">${isVideo ? '🎞️' : '📸'}</span>
           <div class="queue-item-details">
             <div class="queue-item-name" title="${item.file.name}">${item.file.name}</div>
-            <div class="queue-item-size">${UI.formatBytes(item.file.size)}</div>
+            <div style="display:flex; gap:10px; align-items:center;">
+              <span class="queue-item-size">${UI.formatBytes(item.file.size)}</span>
+              <span style="font-size:0.75rem; color:var(--amber); font-weight:700;">Est: ~${item.estimatedCost || 0} pts</span>
+            </div>
           </div>
         </div>
         <div class="queue-item-configs">
@@ -611,19 +872,18 @@ const app = {
     this.providerOnline = !this.providerOnline;
     const toggle = document.getElementById('providerToggle');
     const label = document.getElementById('providerToggleLabel');
-    toggle.classList.toggle('active', this.providerOnline);
-    label.textContent = this.providerOnline ? 'Online' : 'Offline';
+    if (toggle) toggle.classList.toggle('active', this.providerOnline);
+    if (label) label.textContent = this.providerOnline ? 'Online' : 'Offline';
     UI.setText('provStatus', this.providerOnline ? 'Online' : 'Offline');
 
     if (this.providerOnline) {
       signaling.send({ type: 'provider-online', services: this.getProviderServices() });
       this.provStartTime = Date.now();
       this.uptimeInterval = setInterval(() => {
-        const mins = Math.floor((Date.now() - this.provStartTime) / 60000);
+        const mins = Math.floor((Date.now() - (this.provStartTime || Date.now())) / 60000);
         UI.setText('provUptime', mins + 'm');
       }, 10000);
       
-      // Start system stats polling
       this.pollSystemStats();
 
       UI.toast('You are now online — ready for jobs', 'success');
@@ -642,39 +902,41 @@ const app = {
   },
 
   pollSystemStats() {
-    if (!window.api) return;
+    if (!(window as any).api) return;
 
     UI.showEl('diagnosticsCard');
 
     const updateStats = async () => {
       if (!this.providerOnline) return;
       try {
-        const stats = await window.api.getSystemStats();
+        const stats = await (window as any).api.getSystemStats();
         this.lastSystemStats = stats;
 
-        UI.setText('diagCpuVal', `${Math.round(stats.cpu)}%`);
-        document.getElementById('diagCpuBar').style.width = `${stats.cpu}%`;
+        UI.setText('diagCpuVal', `${Math.round(stats.cpuLoad)}%`);
+        const cpuBar = document.getElementById('diagCpuBar');
+        if (cpuBar) cpuBar.style.width = `${stats.cpuLoad}%`;
         
-        UI.setText('diagMemVal', `${Math.round(stats.memory)}%`);
-        document.getElementById('diagMemBar').style.width = `${stats.memory}%`;
+        UI.setText('diagMemVal', `${Math.round(stats.memUsage)}%`);
+        const memBar = document.getElementById('diagMemBar');
+        if (memBar) memBar.style.width = `${stats.memUsage}%`;
         
         UI.setText('diagTempVal', `${Math.round(stats.temp)}°C`);
-        document.getElementById('diagTempBar').style.width = `${Math.min(100, stats.temp)}%`;
-
         const tempBar = document.getElementById('diagTempBar');
-        if (stats.temp > 80) {
-          tempBar.style.background = 'var(--red)';
-        } else if (stats.temp > 65) {
-          tempBar.style.background = 'var(--amber)';
-        } else {
-          tempBar.style.background = 'var(--emerald)';
+        if (tempBar) {
+          tempBar.style.width = `${Math.min(100, stats.temp)}%`;
+          if (stats.temp > 80) {
+            tempBar.style.background = 'var(--red)';
+          } else if (stats.temp > 65) {
+            tempBar.style.background = 'var(--amber)';
+          } else {
+            tempBar.style.background = 'var(--emerald)';
+          }
         }
 
-        // Live CPU compliance status
-        const cpuLimit = parseFloat(document.getElementById('srvCpuLimit').value);
+        const cpuLimit = parseFloat((document.getElementById('srvCpuLimit') as HTMLInputElement).value);
         const cpuBadge = document.getElementById('policyCpuBadge');
         if (cpuBadge) {
-          if (stats.cpu > cpuLimit) {
+          if (stats.cpuLoad > cpuLimit) {
             cpuBadge.textContent = '✗ CPU Policy Fail';
             cpuBadge.classList.add('fail');
           } else {
@@ -713,7 +975,7 @@ const app = {
       UI.toast('P2P connected — receiving file...', 'success');
     };
 
-    this.peer.onProgress = (stage, pct) => {
+    this.peer.onProgress = (stage: string, pct: number) => {
       if (stage === 'receiving') {
         UI.setProgress('provReceiveProgress', pct);
         UI.setStage('provStageReceive', 'active', Math.round(pct) + '%');
@@ -723,23 +985,23 @@ const app = {
       }
     };
 
-    this.peer.onFileReceived = async (fileData, meta, isNative) => {
+    this.peer.onFileReceived = async (fileData: any, meta: any, isNative: boolean) => {
       UI.setStage('provStageReceive', 'done', '✓ received');
       UI.setStage('provStageTranscode', 'active', 'starting engine...');
       this._appendLog('File received: ' + UI.formatBytes(meta.fileSize));
 
       try {
-        let resultData;
+        let resultData: any;
 
-        if (isNative && window.api) {
+        if (isNative && (window as any).api) {
           this._appendLog('Starting native FFmpeg transcode...');
           this._cleanupProviderListeners();
 
-          this.ffmpegLogUnsubscribe = window.api.onTranscodeLog((data) => {
+          this.ffmpegLogUnsubscribe = (window as any).api.onTranscodeLog((data: any) => {
             if (data.jobId === this.currentJobId) this._appendLog(data.msg);
           });
           
-          this.ffmpegProgressUnsubscribe = window.api.onTranscodeProgress((data) => {
+          this.ffmpegProgressUnsubscribe = (window as any).api.onTranscodeProgress((data: any) => {
             if (data.jobId === this.currentJobId) {
               UI.setProgress('provStageTranscodeProgress', data.pct);
               UI.setStage('provStageTranscode', 'active', data.pct + '%');
@@ -748,9 +1010,8 @@ const app = {
             }
           });
 
-          // fileData is the temp file path
-          const useGpu = document.getElementById('srvGpu')?.checked || false;
-          resultData = await window.api.transcode(this.currentJobId, fileData, meta.format, meta.quality, meta.mediaType, useGpu);
+          const useGpu = (document.getElementById('srvGpu') as HTMLInputElement | null)?.checked || false;
+          resultData = await (window as any).api.transcode(this.currentJobId, fileData, meta.format, meta.quality, meta.mediaType, useGpu);
         } else {
           throw new Error('Native IPC bridge not available. Please run in Electron.');
         }
@@ -759,7 +1020,6 @@ const app = {
         UI.setStage('provStageSend', 'active', 'sending...');
         this._appendLog('Transcode complete! Sending result back...');
 
-        // Send result back to client
         const inputBaseName = (meta.fileName || 'output').replace(/\.[^.]+$/, '');
         await this.peer.sendFile(resultData, {
           format: meta.format,
@@ -775,27 +1035,31 @@ const app = {
         UI.setText('provJobsDone', this.provJobsDone);
         UI.setText('provDataProcessed', UI.formatBytes(this.provDataProcessed));
 
-        signaling.send({ type: 'job-complete', jobId: this.currentJobId, logs: this.jobLogs.slice() });
+        signaling.send({ 
+          type: 'job-complete', 
+          jobId: this.currentJobId, 
+          logs: this.jobLogs.slice(),
+          actualFrames: meta.frameCount || 0,
+          actualWidth: meta.width || 0,
+          actualHeight: meta.height || 0
+        });
 
-        // Cleanup native temp files
-        if (isNative && window.api) {
-          window.api.deleteFile(fileData); // Delete input
-          window.api.deleteFile(resultData); // Delete output
+        if (isNative && (window as any).api) {
+          (window as any).api.deleteFile(fileData);
+          (window as any).api.deleteFile(resultData);
         }
 
         this._cleanupProviderListeners();
-
-        // Reset after delay
         setTimeout(() => this._providerReset(), 3000);
 
-      } catch (e) {
+      } catch (e: any) {
         this._appendLog('❌ ERROR: ' + e.message);
         UI.toast('Transcoding failed: ' + e.message, 'error');
         signaling.send({ type: 'job-failed', jobId: this.currentJobId, error: e.message, stack: e.stack || null, logs: this.jobLogs.slice() });
         this._cleanupProviderListeners();
         
-        if (isNative && window.api && typeof fileData === 'string') {
-           window.api.deleteFile(fileData);
+        if (isNative && (window as any).api && typeof fileData === 'string') {
+          (window as any).api.deleteFile(fileData);
         }
         
         this._providerReset();
@@ -812,7 +1076,6 @@ const app = {
     UI.hide('jobNotification');
     UI.showEl('providerIdle');
     
-    // Reset policy badges on reset
     const sizeBadge = document.getElementById('policySizeBadge');
     if (sizeBadge) {
       sizeBadge.textContent = '✓ Size Policy Pass';
@@ -831,7 +1094,7 @@ const app = {
     }
   },
 
-  _formatJobOutput(settings = {}) {
+  _formatJobOutput(settings: any = {}) {
     const format = (settings.format || '—').toUpperCase();
     if (settings.mediaType === 'image') {
       const quality = settings.quality || '—';
@@ -840,17 +1103,19 @@ const app = {
     return `${format} @ ${settings.quality || '—'}p`;
   },
 
-  _appendLog(msg) {
+  _appendLog(msg: string) {
     const log = document.getElementById('ffmpegLog');
-    log.textContent += '\n' + msg;
-    log.scrollTop = log.scrollHeight;
+    if (log) {
+      log.textContent += '\n' + msg;
+      log.scrollTop = log.scrollHeight;
+    }
     this.jobLogs.push({ time: Date.now(), msg });
   },
 
   /* ─── History & Logs ─── */
   async refreshHistory() {
     try {
-      const baseUrl = window.api ? 'http://localhost:3000' : '';
+      const baseUrl = (window as any).api ? 'http://localhost:3000' : '';
       const res = await fetch(`${baseUrl}/api/history`);
       this.historyData = await res.json();
       this.renderHistory(this.historyData);
@@ -860,7 +1125,7 @@ const app = {
   },
 
   filterHistory() {
-    const filter = document.getElementById('historyFilter').value;
+    const filter = (document.getElementById('historyFilter') as HTMLSelectElement).value;
     if (filter === 'all') {
       this.renderHistory(this.historyData);
     } else {
@@ -870,15 +1135,17 @@ const app = {
 
   async clearHistory() {
     if (!confirm('Clear all job history?')) return;
-    const baseUrl = window.api ? 'http://localhost:3000' : '';
+    const baseUrl = (window as any).api ? 'http://localhost:3000' : '';
     await fetch(`${baseUrl}/api/history`, { method: 'DELETE' });
     this.historyData = [];
     this.renderHistory([]);
     UI.toast('History cleared', 'success');
   },
 
-  renderHistory(data) {
+  renderHistory(data: any[]) {
     const body = document.getElementById('historyBody');
+    if (!body) return;
+
     const total = this.historyData.length;
     const success = this.historyData.filter(j => j.status === 'complete').length;
     const failed = this.historyData.filter(j => j.status === 'failed').length;
@@ -893,7 +1160,7 @@ const app = {
       return;
     }
 
-    body.innerHTML = ''; // Clear and use secure fragment
+    body.innerHTML = '';
     const fragment = document.createDocumentFragment();
 
     data.forEach((job, i) => {
@@ -904,7 +1171,6 @@ const app = {
       
       const tr = document.createElement('tr');
       
-      // Escape all user-provided strings implicitly by using textContent or safe templates
       tr.innerHTML = `
         <td class="job-id-cell"></td>
         <td class="file-cell"></td>
@@ -915,12 +1181,12 @@ const app = {
         <td><button class="detail-btn ${isErr ? 'error-btn' : ''}">${isErr ? '⚠ Error' : '👁 View'}</button></td>
       `;
 
-      tr.querySelector('.job-id-cell').textContent = job.jobId;
-      tr.querySelector('.file-cell').textContent = s.fileName || '—';
-      tr.querySelector('.file-cell').title = s.fileName || '';
+      tr.querySelector('.job-id-cell')!.textContent = job.jobId;
+      tr.querySelector('.file-cell')!.textContent = s.fileName || '—';
+      (tr.querySelector('.file-cell') as HTMLElement).title = s.fileName || '';
       tr.querySelectorAll('td')[2].textContent = this._formatJobOutput(s);
-      tr.querySelector('.status-badge').textContent = isErr ? 'Failed' : 'Complete';
-      tr.querySelector('.detail-btn').onclick = () => this.viewDetail(i, document.getElementById('historyFilter').value);
+      tr.querySelector('.status-badge')!.textContent = isErr ? 'Failed' : 'Complete';
+      (tr.querySelector('.detail-btn') as HTMLButtonElement).onclick = () => this.viewDetail(i, (document.getElementById('historyFilter') as HTMLSelectElement).value);
 
       fragment.appendChild(tr);
     });
@@ -928,7 +1194,7 @@ const app = {
     body.appendChild(fragment);
   },
 
-  viewDetail(index, filter) {
+  viewDetail(index: number, filter: string) {
     let data = filter === 'all' ? this.historyData : this.historyData.filter(j => j.status === filter);
     const job = data[index];
     if (!job) return;
@@ -942,52 +1208,59 @@ const app = {
     UI.setText('detailTime', job.createdAt ? new Date(job.createdAt).toLocaleString() : '—');
 
     const statusEl = document.getElementById('detailStatus');
-    statusEl.innerHTML = '';
-    const badge = document.createElement('span');
-    badge.className = `status-badge ${job.status}`;
-    badge.textContent = job.status === 'failed' ? 'Failed' : 'Complete';
-    statusEl.appendChild(badge);
+    if (statusEl) {
+      statusEl.innerHTML = '';
+      const badge = document.createElement('span');
+      badge.className = `status-badge ${job.status}`;
+      badge.textContent = job.status === 'failed' ? 'Failed' : 'Complete';
+      statusEl.appendChild(badge);
+    }
 
-    // Error section
     const errSection = document.getElementById('detailErrorSection');
-    if (job.error) {
-      errSection.style.display = 'block';
-      UI.setText('detailErrorMsg', job.error);
-      if (job.stack) {
-        document.getElementById('detailStackSection').style.display = 'block';
-        UI.setText('detailStack', job.stack);
+    if (errSection) {
+      if (job.error) {
+        errSection.style.display = 'block';
+        UI.setText('detailErrorMsg', job.error);
+        const stackSection = document.getElementById('detailStackSection');
+        if (stackSection) {
+          if (job.stack) {
+            stackSection.style.display = 'block';
+            UI.setText('detailStack', job.stack);
+          } else {
+            stackSection.style.display = 'none';
+          }
+        }
       } else {
-        document.getElementById('detailStackSection').style.display = 'none';
+        errSection.style.display = 'none';
       }
-    } else {
-      errSection.style.display = 'none';
     }
 
-    // Logs
     const logsEl = document.getElementById('detailLogs');
-    if (job.logs && job.logs.length) {
-      logsEl.textContent = job.logs.map(l => {
-        const t = l.time ? new Date(l.time).toLocaleTimeString() : '';
-        return `[${t}] ${l.msg}`;
-      }).join('\n');
-    } else {
-      logsEl.textContent = 'No logs recorded for this job';
+    if (logsEl) {
+      if (job.logs && job.logs.length) {
+        logsEl.textContent = job.logs.map((l: any) => {
+          const t = l.time ? new Date(l.time).toLocaleTimeString() : '';
+          return `[${t}] ${l.msg}`;
+        }).join('\n');
+      } else {
+        logsEl.textContent = 'No logs recorded for this job';
+      }
     }
 
-    document.getElementById('errorDetailPanel').classList.add('active');
-    document.getElementById('errorDetailPanel').scrollIntoView({ behavior: 'smooth', block: 'start' });
+    document.getElementById('errorDetailPanel')?.classList.add('active');
+    document.getElementById('errorDetailPanel')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
   },
 
   closeDetail() {
-    document.getElementById('errorDetailPanel').classList.remove('active');
+    document.getElementById('errorDetailPanel')?.classList.remove('active');
   },
 
   /* ─── Provider Services Configuration ─── */
   getProviderServices() {
-    const services = [];
-    if (document.getElementById('srvVideo')?.checked) services.push('video');
-    if (document.getElementById('srvImage')?.checked) services.push('image');
-    if (document.getElementById('srvGpu')?.checked) services.push('gpu');
+    const services: string[] = [];
+    if ((document.getElementById('srvVideo') as HTMLInputElement | null)?.checked) services.push('video');
+    if ((document.getElementById('srvImage') as HTMLInputElement | null)?.checked) services.push('image');
+    if ((document.getElementById('srvGpu') as HTMLInputElement | null)?.checked) services.push('gpu');
     return services;
   },
 
@@ -995,32 +1268,45 @@ const app = {
     const services = this.getProviderServices();
     if (services.length === 0) {
       UI.toast('Please enable at least one compute module to host jobs.', 'error');
-      document.getElementById('srvVideo').checked = true;
-      document.getElementById('srvImage').checked = true;
+      const vCheck = document.getElementById('srvVideo') as HTMLInputElement | null;
+      const iCheck = document.getElementById('srvImage') as HTMLInputElement | null;
+      if (vCheck) vCheck.checked = true;
+      if (iCheck) iCheck.checked = true;
       return;
     }
     
     if (this.role === 'provider' && this.providerOnline) {
-      signaling.send({ type: 'provider-update-services', services });
+      if (this.identity) {
+        signaling.send({
+          type: 'register-identity',
+          nodeId: this.identity.nodeId,
+          nodeSecret: this.identity.nodeSecret,
+          role: this.role,
+          services,
+          benchmarkScore: this.benchmarkScore || 0,
+          status: this.providerOnline ? 'online' : 'offline'
+        });
+      }
       UI.toast('Compute modules updated successfully', 'success');
+      setTimeout(() => this.runBenchmark(true), 500);
     }
   },
 
   /* ─── Custom Titlebar Window Control ─── */
   minimizeWindow() {
-    if (window.api) window.api.minimizeWindow();
+    if ((window as any).api) (window as any).api.minimizeWindow();
   },
   maximizeWindow() {
-    if (window.api) window.api.maximizeWindow();
+    if ((window as any).api) (window as any).api.maximizeWindow();
   },
   closeWindow() {
-    if (window.api) window.api.closeWindow();
+    if ((window as any).api) (window as any).api.closeWindow();
   },
 
   /* ─── OS & Browser Notifications ─── */
-  notifyUser(title, message) {
-    if (window.api) {
-      window.api.sendNotification(title, message);
+  notifyUser(title: string, message: string) {
+    if ((window as any).api) {
+      (window as any).api.sendNotification(title, message);
     } else if (Notification.permission === 'granted') {
       new Notification(title, { body: message });
     } else if (Notification.permission !== 'denied') {
@@ -1033,12 +1319,14 @@ const app = {
   },
 
   /* ─── Auto-Updater UI ─── */
-  _showUpdateCard(state, version) {
+  _showUpdateCard(state: 'available' | 'downloading' | 'downloaded', version: string) {
     const card = document.getElementById('updateCard');
     const title = document.getElementById('updateTitle');
     const desc = document.getElementById('updateDesc');
-    const actionBtn = document.getElementById('updateActionBtn');
-    const dismissBtn = document.getElementById('updateDismissBtn');
+    const actionBtn = document.getElementById('updateActionBtn') as HTMLButtonElement | null;
+    const dismissBtn = document.getElementById('updateDismissBtn') as HTMLButtonElement | null;
+
+    if (!card || !title || !desc || !actionBtn || !dismissBtn) return;
 
     if (state === 'available') {
       title.textContent = `Update v${version} Available`;
@@ -1066,20 +1354,20 @@ const app = {
   },
 
   downloadUpdate() {
-    if (!window.api) return;
+    if (!(window as any).api) return;
     this._showUpdateCard('downloading', this._pendingUpdateVersion || '');
-    window.api.downloadUpdate();
+    (window as any).api.downloadUpdate();
     UI.toast('Downloading update...', 'info');
   },
 
   installUpdate() {
-    if (!window.api) return;
-    window.api.installUpdate();
+    if (!(window as any).api) return;
+    (window as any).api.installUpdate();
   },
 
   dismissUpdate() {
     const card = document.getElementById('updateCard');
-    card.classList.remove('active');
+    if (card) card.classList.remove('active');
   }
 };
 

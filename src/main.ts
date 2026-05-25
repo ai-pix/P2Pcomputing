@@ -1,23 +1,55 @@
-const { app, BrowserWindow, ipcMain, dialog, Tray, Menu, Notification } = require('electron');
-const path = require('path');
-const fs = require('fs');
-const os = require('os');
-const { spawn } = require('child_process');
-const { autoUpdater } = require('electron-updater');
-// In packaged Electron builds, the binary lives in app.asar.unpacked/
-const ffmpegPath = require('ffmpeg-static').replace('app.asar', 'app.asar.unpacked');
+import { app, BrowserWindow, ipcMain, dialog, Tray, Menu, Notification } from 'electron';
+import * as path from 'path';
+import * as fs from 'fs';
+import * as os from 'os';
+import { spawn } from 'child_process';
+import { autoUpdater } from 'electron-updater';
+import * as crypto from 'crypto';
 
-let mainWindow;
-let tray = null;
+// ffmpeg-static has no types, require it dynamically
+const ffmpegPath: string = require('ffmpeg-static').replace('app.asar', 'app.asar.unpacked');
+
+let mainWindow: BrowserWindow | null = null;
+let tray: Tray | null = null;
 let isQuitting = false;
+let nodeIdentity: { nodeId: string; nodeSecret: string } | null = null;
+
+function ensureIdentity() {
+  const userDataPath = app.getPath('userData');
+  if (!fs.existsSync(userDataPath)) {
+    fs.mkdirSync(userDataPath, { recursive: true });
+  }
+  const configPath = path.join(userDataPath, 'config.json');
+  let config: any = {};
+
+  try {
+    if (fs.existsSync(configPath)) {
+      config = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+    }
+  } catch (e) {
+    console.error('Failed to read config, resetting...', e);
+  }
+
+  if (!config.nodeId || !config.nodeSecret) {
+    config.nodeId = 'node-' + crypto.randomBytes(8).toString('hex');
+    config.nodeSecret = crypto.randomBytes(16).toString('hex');
+    try {
+      fs.writeFileSync(configPath, JSON.stringify(config, null, 2), 'utf8');
+    } catch (e) {
+      console.error('Failed to write identity config:', e);
+    }
+  }
+
+  return config as { nodeId: string; nodeSecret: string };
+}
 
 // Secure base directory for all file operations
 const BASE_TEMP_DIR = path.join(os.tmpdir(), 'transcodenet-work');
 if (!fs.existsSync(BASE_TEMP_DIR)) fs.mkdirSync(BASE_TEMP_DIR, { recursive: true });
 
 // Store open write streams for incoming files
-const writeStreams = new Map();
-const tempFiles = new Set();
+const writeStreams = new Map<string, fs.WriteStream>();
+const tempFiles = new Set<string>();
 
 function createWindow() {
   mainWindow = new BrowserWindow({
@@ -41,7 +73,7 @@ function createWindow() {
   mainWindow.on('close', (event) => {
     if (!isQuitting) {
       event.preventDefault();
-      mainWindow.hide();
+      mainWindow?.hide();
       showTrayNotification(
         'TranscodeNet is running in the background',
         'Your node remains active to host transcoding tasks. Double-click the tray icon to restore.'
@@ -96,7 +128,7 @@ function createTray() {
   });
 }
 
-function showTrayNotification(title, message) {
+function showTrayNotification(title: string, message: string) {
   if (Notification.isSupported()) {
     new Notification({
       title: title,
@@ -122,7 +154,6 @@ function cleanupTempFiles() {
     const files = fs.readdirSync(BASE_TEMP_DIR);
     for (const file of files) {
       const fullPath = path.join(BASE_TEMP_DIR, file);
-      // Only delete files older than 1 hour to avoid deleting active session files if multiple instances run
       const stats = fs.statSync(fullPath);
       if (Date.now() - stats.mtimeMs > 3600000) {
         fs.unlinkSync(fullPath);
@@ -134,7 +165,7 @@ function cleanupTempFiles() {
 }
 
 // Helper to ensure path is within BASE_TEMP_DIR
-function getSafePath(jobId, fileName, isOutput = false) {
+function getSafePath(jobId: string, fileName: string, isOutput = false) {
   const safeJobId = jobId.toString().replace(/[^a-zA-Z0-9_-]/g, '');
   const suffix = isOutput ? '_out' : '_in';
   
@@ -151,24 +182,21 @@ function getSafePath(jobId, fileName, isOutput = false) {
   return finalPath;
 }
 
-let bestHwEncoder = null;
+let bestHwEncoder: string | null = null;
 let bestHwLabel = 'None (Software Only)';
 let gpuModelName = 'Standard CPU';
 
-async function detectHardwareAcceleration() {
+async function detectHardwareAcceleration(): Promise<string | null> {
   return new Promise((resolve) => {
-    // 1. Get GPU Model Name
     const gpuNameProc = spawn('powershell.exe', ['-NoProfile', '-Command', 'Get-CimInstance Win32_VideoController | Select-Object -ExpandProperty Name']);
     let gpuOutput = '';
     gpuNameProc.stdout.on('data', (data) => gpuOutput += data.toString());
     gpuNameProc.on('close', () => {
       const names = gpuOutput.trim().split(/\r?\n/).filter(n => n.trim());
       if (names.length > 0) {
-        // Prefer NVIDIA/AMD over Intel if multiple GPUs exist (typical laptop setup)
         gpuModelName = names.find(n => n.includes('NVIDIA') || n.includes('AMD')) || names[0];
       }
 
-      // 2. Get Available Encoders
       const encodersToTry = [
         { name: 'h264_nvenc', label: 'NVIDIA NVENC' },
         { name: 'h264_amf', label: 'AMD AMF' },
@@ -199,13 +227,13 @@ async function detectHardwareAcceleration() {
 }
 
 app.whenReady().then(async () => {
+  nodeIdentity = ensureIdentity();
   cleanupTempFiles(); // Clean up old files on startup
   await detectHardwareAcceleration();
   createWindow();
   createTray();
 
-  // ─── Auto-Updater Setup ───
-  autoUpdater.autoDownload = false; // Don't auto-download, let the user choose
+  autoUpdater.autoDownload = false;
   autoUpdater.autoInstallOnAppQuit = true;
 
   autoUpdater.on('update-available', (info) => {
@@ -225,7 +253,6 @@ app.whenReady().then(async () => {
     }
   });
 
-  // Check for updates 3 seconds after launch
   setTimeout(() => {
     autoUpdater.checkForUpdates().catch(err => {
       console.log('Auto-updater check skipped:', err.message);
@@ -241,7 +268,6 @@ app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit();
 });
 
-/* ─── IPC Handlers for Custom Titlebar Window Control ─── */
 ipcMain.handle('win:minimize', () => {
   if (mainWindow) mainWindow.minimize();
 });
@@ -257,30 +283,94 @@ ipcMain.handle('win:maximize', () => {
 });
 
 ipcMain.handle('win:close', () => {
-  if (mainWindow) mainWindow.close(); // Triggers the 'close' event above (hides to tray)
+  if (mainWindow) mainWindow.close();
 });
 
-/* ─── IPC Handler for Native OS Notifications ─── */
+ipcMain.handle('identity:get', () => nodeIdentity);
+
+ipcMain.handle('system:runBenchmark', async (event, useGpu = false) => {
+  return new Promise((resolve) => {
+    const encoder = (useGpu && bestHwEncoder) ? bestHwEncoder : 'libx264';
+    let extraArgs: string[] = [];
+    
+    if (encoder === 'libx264') {
+      extraArgs = ['-preset', 'ultrafast'];
+    } else if (encoder === 'h264_nvenc') {
+      extraArgs = ['-preset', 'p1'];
+    } else if (encoder === 'h264_qsv') {
+      extraArgs = ['-preset', 'veryfast'];
+    }
+    
+    const args = [
+      '-f', 'lavfi', 
+      '-i', 'testsrc=duration=10:size=1280x720:rate=30', 
+      '-c:v', encoder, 
+      ...extraArgs, 
+      '-f', 'null', 
+      '-'
+    ];
+    
+    console.log(`⚡ Running transcode benchmark with encoder: ${encoder}...`);
+    const start = Date.now();
+    const ffmpegProc = spawn(ffmpegPath, args);
+    
+    let stderrOutput = '';
+    if (ffmpegProc.stderr) {
+      ffmpegProc.stderr.on('data', (data) => {
+        stderrOutput += data.toString();
+      });
+    }
+    
+    ffmpegProc.on('close', (code) => {
+      const elapsed = (Date.now() - start) / 1000;
+      if (code === 0) {
+        // Try parsing actual average FPS from FFmpeg output (to avoid process startup delay penalty)
+        const matches = [...stderrOutput.matchAll(/fps=\s*([\d.]+)/g)];
+        if (matches.length > 0) {
+          const lastFpsStr = matches[matches.length - 1][1];
+          const parsedFps = Math.round(parseFloat(lastFpsStr));
+          if (!isNaN(parsedFps) && parsedFps > 0) {
+            console.log(`⏱️ Benchmark completed. Reported FPS via FFmpeg stderr: ${parsedFps} (wall-clock FPS: ${Math.round(300 / elapsed)})`);
+            resolve(parsedFps);
+            return;
+          }
+        }
+        
+        // Fallback to wall-clock calculation if parsing failed
+        const wallClockFps = elapsed > 0 ? Math.round(300 / elapsed) : 10;
+        console.log(`⏱️ Benchmark completed. Elapsed: ${elapsed}s, Fallback Wall-Clock FPS: ${wallClockFps}`);
+        resolve(wallClockFps);
+      } else {
+        console.error(`Benchmark failed with exit status: ${code}`);
+        resolve(10);
+      }
+    });
+    
+    ffmpegProc.on('error', (err) => {
+      console.error('Benchmark process error:', err);
+      resolve(10);
+    });
+  });
+});
+
 ipcMain.handle('notification:send', (event, title, message) => {
   showTrayNotification(title, message);
 });
 
-/* ─── IPC Handler for Hardware Info ─── */
 ipcMain.handle('ffmpeg:getHwInfo', () => ({
   encoder: bestHwEncoder,
   label: bestHwLabel,
   model: gpuModelName
 }));
 
-/* ─── IPC Handler for Real-time System Stats ─── */
-let lastCpuUsage = null;
+let lastCpuUsage: { idle: number; total: number } | null = null;
 ipcMain.handle('system:getStats', () => {
   const cpus = os.cpus();
   let totalIdle = 0;
   let totalTick = 0;
   for (const cpu of cpus) {
     for (const type in cpu.times) {
-      totalTick += cpu.times[type];
+      totalTick += (cpu.times as any)[type];
     }
     totalIdle += cpu.times.idle;
   }
@@ -299,7 +389,6 @@ ipcMain.handle('system:getStats', () => {
   const freeMem = os.freemem();
   const memUsage = Math.round(((totalMem - freeMem) / totalMem) * 100);
   
-  // Model CPU temp: base is 38C, max load adds 40C, with 0-2C of jitter
   const temp = Math.round(38 + (cpuLoad * 0.4) + Math.random() * 2);
 
   return {
@@ -311,8 +400,6 @@ ipcMain.handle('system:getStats', () => {
   };
 });
 
-
-/* ─── IPC Handlers for Auto-Updater ─── */
 ipcMain.handle('update:download', () => {
   autoUpdater.downloadUpdate().catch(err => {
     console.error('Update download failed:', err.message);
@@ -324,7 +411,6 @@ ipcMain.handle('update:install', () => {
   autoUpdater.quitAndInstall(false, true);
 });
 
-/* ─── IPC Handlers for File I/O (Chunked) ─── */
 ipcMain.handle('fs:createTempWrite', (event, jobId, extension) => {
   const tempPath = getSafePath(jobId, `file${extension}`);
   tempFiles.add(tempPath);
@@ -340,12 +426,12 @@ ipcMain.handle('fs:createTempWrite', (event, jobId, extension) => {
 });
 
 ipcMain.handle('fs:writeTempChunk', (event, jobId, buffer) => {
-  return new Promise((resolve, reject) => {
+  return new Promise<void>((resolve, reject) => {
     const stream = writeStreams.get(jobId);
     if (!stream) return reject(new Error('Stream not found or closed due to error'));
     
     const buf = Buffer.isBuffer(buffer) ? buffer : Buffer.from(buffer);
-    const canWrite = stream.write(buf, (err) => {
+    stream.write(buf, (err) => {
       if (err) reject(err);
       else resolve();
     });
@@ -353,13 +439,13 @@ ipcMain.handle('fs:writeTempChunk', (event, jobId, buffer) => {
 });
 
 ipcMain.handle('fs:finishTempWrite', (event, jobId) => {
-  return new Promise((resolve, reject) => {
+  return new Promise<string>((resolve, reject) => {
     const stream = writeStreams.get(jobId);
     if (!stream) return reject(new Error('Stream not found'));
     
     stream.end(() => {
       writeStreams.delete(jobId);
-      resolve(stream.path);
+      resolve(stream.path as string);
     });
   });
 });
@@ -375,15 +461,15 @@ ipcMain.handle('fs:getSize', (event, filePath) => {
 });
 
 ipcMain.handle('fs:readChunk', (event, filePath, start, end) => {
-  return new Promise((resolve, reject) => {
+  return new Promise<Buffer>((resolve, reject) => {
     if (!filePath.startsWith(BASE_TEMP_DIR)) {
       return reject(new Error('Access denied: File outside sandbox'));
     }
 
     const stream = fs.createReadStream(filePath, { start, end });
-    const chunks = [];
+    const chunks: Buffer[] = [];
     
-    stream.on('data', (chunk) => chunks.push(chunk));
+    stream.on('data', (chunk) => chunks.push(Buffer.from(chunk)));
     stream.on('error', (err) => reject(err));
     stream.on('end', () => {
       resolve(Buffer.concat(chunks));
@@ -419,18 +505,15 @@ ipcMain.handle('fs:saveOutputFile', async (event, filePath, defaultName = 'outpu
   return { canceled: false, filePath: destinationPath };
 });
 
-/* ─── FFmpeg Helper ─── */
-function runFFmpeg(args, event, jobId, progressOffset = 0, progressScale = 1) {
+function runFFmpeg(args: string[], event: any, jobId: string, progressOffset = 0, progressScale = 1): Promise<number> {
   return new Promise((resolve, reject) => {
     const ffmpegProc = spawn(ffmpegPath, args);
     let durationSecs = 0;
 
     ffmpegProc.stderr.on('data', (data) => {
       const msg = data.toString();
-      // Send raw logs for the new "Terminal Output"
       event.sender.send('ffmpeg:log', { jobId, msg: msg.trim() });
       
-      // Extract duration if not already known
       if (durationSecs === 0) {
         const durMatch = msg.match(/Duration: (\d{2}):(\d{2}):(\d{2}\.\d{2})/);
         if (durMatch) {
@@ -438,7 +521,6 @@ function runFFmpeg(args, event, jobId, progressOffset = 0, progressScale = 1) {
         }
       }
 
-      // Extract time to report progress
       const timeMatch = msg.match(/time=(\d{2}):(\d{2}):(\d{2}\.\d{2})/);
       if (timeMatch && durationSecs > 0) {
         const currentSecs = parseInt(timeMatch[1]) * 3600 + parseInt(timeMatch[2]) * 60 + parseFloat(timeMatch[3]);
@@ -457,7 +539,6 @@ function runFFmpeg(args, event, jobId, progressOffset = 0, progressScale = 1) {
   });
 }
 
-/* ─── IPC Handler for Native FFmpeg ─── */
 ipcMain.handle('ffmpeg:transcode', async (event, jobId, inputPath, format, quality, mediaType = 'video', useGpu = false) => {
   if (!inputPath.startsWith(BASE_TEMP_DIR)) {
     throw new Error('Access denied: Input file outside sandbox');
@@ -469,7 +550,7 @@ ipcMain.handle('ffmpeg:transcode', async (event, jobId, inputPath, format, quali
   if (mediaType === 'image') {
     event.sender.send('ffmpeg:log', { jobId, msg: `🖼️ Processing Image: ${format} (${quality}%)` });
     const qVal = parseInt(quality) || 80;
-    let formatArgs = [];
+    let formatArgs: string[] = [];
     let outputArgs = ['-frames:v', '1'];
     
     switch (format) {
@@ -492,17 +573,15 @@ ipcMain.handle('ffmpeg:transcode', async (event, jobId, inputPath, format, quali
     return outputPath;
   }
 
-  // Check file size for bypass threshold (100MB)
   const stats = fs.statSync(inputPath);
   const fileSizeMB = stats.size / (1024 * 1024);
   const BYPASS_THRESHOLD_MB = 100;
 
   if (fileSizeMB < BYPASS_THRESHOLD_MB) {
     event.sender.send('ffmpeg:log', { jobId, msg: `⚡ Small file detected (${fileSizeMB.toFixed(1)}MB < ${BYPASS_THRESHOLD_MB}MB). Bypassing parallel chunk engine...` });
-    let args;
+    let args: string[];
     let success = false;
 
-    // Try GPU Path first if enabled
     if (useGpu && bestHwEncoder) {
       event.sender.send('ffmpeg:log', { jobId, msg: `⚡ Processing video using GPU...` });
       try {
@@ -515,12 +594,11 @@ ipcMain.handle('ffmpeg:transcode', async (event, jobId, inputPath, format, quali
         }
         await runFFmpeg(args, event, jobId, 0, 1);
         success = true;
-      } catch (e) {
+      } catch (e: any) {
         event.sender.send('ffmpeg:log', { jobId, msg: `⚠️ GPU Failed: ${e.message}. Falling back to CPU...` });
       }
     }
 
-    // CPU Fallback
     if (!success) {
       event.sender.send('ffmpeg:log', { jobId, msg: `🐌 Processing video using CPU (Robust Mode)...` });
       args = ['-i', inputPath, '-vf', `scale=-2:${quality},format=yuv420p`, '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '28', '-c:a', 'aac', '-y', outputPath];
@@ -531,14 +609,12 @@ ipcMain.handle('ffmpeg:transcode', async (event, jobId, inputPath, format, quali
     return outputPath;
   }
 
-  // 🚀 Resilient Parallel Engine for Video
   event.sender.send('ffmpeg:log', { jobId, msg: `💎 Initializing Resilient Chunk Engine...` });
   
   const chunkDir = path.join(BASE_TEMP_DIR, `chunks_${jobId}`);
   if (!fs.existsSync(chunkDir)) fs.mkdirSync(chunkDir, { recursive: true });
 
   try {
-    // 1. Split (5% of progress)
     event.sender.send('ffmpeg:log', { jobId, msg: `📦 PHASE 1: Splitting video into high-speed segments...` });
     const splitArgs = ['-i', inputPath, '-c', 'copy', '-map', '0', '-f', 'segment', '-segment_time', '15', '-reset_timestamps', '1', path.join(chunkDir, 'seg_%03d.mp4')];
     await runFFmpeg(splitArgs, event, jobId, 0, 0.05);
@@ -546,8 +622,7 @@ ipcMain.handle('ffmpeg:transcode', async (event, jobId, inputPath, format, quali
     const segments = fs.readdirSync(chunkDir).filter(f => f.startsWith('seg_')).sort();
     event.sender.send('ffmpeg:log', { jobId, msg: `🔧 PHASE 2: Detected ${segments.length} segments. Starting parallel transcode...` });
 
-    // 2. Transcode (90% of progress)
-    const CONCURRENCY = useGpu ? 2 : 1; // Safe parallel chunks for GPU, sequential for CPU
+    const CONCURRENCY = useGpu ? 2 : 1;
     let completed = 0;
     
     for (let i = 0; i < segments.length; i += CONCURRENCY) {
@@ -557,34 +632,29 @@ ipcMain.handle('ffmpeg:transcode', async (event, jobId, inputPath, format, quali
         const segInput = path.join(chunkDir, seg);
         const segOutput = path.join(chunkDir, `out_${seg}`);
         
-        let args;
+        let args: string[];
         let success = false;
 
         const progOffset = 0.05 + (segIndex / segments.length) * 0.9;
         const progScale = (1 / segments.length) * 0.9;
 
-        // Try GPU Path first if enabled
         if (useGpu && bestHwEncoder) {
           event.sender.send('ffmpeg:log', { jobId, msg: `⚡ Processing ${seg} using GPU...` });
           try {
             if (bestHwEncoder === 'h264_nvenc') {
-              // CPU Decode & Scale + NVENC GPU Encode for absolute stability & format compatibility
               args = ['-i', segInput, '-vf', `scale=-2:${quality},format=yuv420p`, '-c:v', 'h264_nvenc', '-preset', 'p1', '-rc', 'vbr', '-cq', '28', '-tune', 'ull', '-zerolatency', '1', '-c:a', 'aac', '-y', segOutput];
             } else if (bestHwEncoder === 'h264_qsv') {
-              // CPU Decode & Scale + QSV GPU Encode to avoid device initialization and scaling crashes
               args = ['-i', segInput, '-vf', `scale=-2:${quality},format=yuv420p`, '-c:v', 'h264_qsv', '-preset', 'veryfast', '-global_quality', '28', '-c:a', 'aac', '-y', segOutput];
             } else {
-              // CPU Decode & Scale + Generic GPU Encode (AMD AMF, etc.) removing -hwaccel auto to avoid surface mismatches
               args = ['-i', segInput, '-vf', `scale=-2:${quality},format=yuv420p`, '-c:v', bestHwEncoder, '-c:a', 'aac', '-y', segOutput];
             }
             await runFFmpeg(args, event, jobId, progOffset, progScale);
             success = true;
-          } catch (e) {
+          } catch (e: any) {
             event.sender.send('ffmpeg:log', { jobId, msg: `⚠️ GPU Failed for ${seg}: ${e.message}. Falling back to CPU...` });
           }
         }
 
-        // CPU Fallback
         if (!success) {
           event.sender.send('ffmpeg:log', { jobId, msg: `🐌 Processing ${seg} using CPU (Robust Mode)...` });
           args = ['-i', segInput, '-vf', `scale=-2:${quality},format=yuv420p`, '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '28', '-c:a', 'aac', '-y', segOutput];
@@ -597,7 +667,6 @@ ipcMain.handle('ffmpeg:transcode', async (event, jobId, inputPath, format, quali
       }));
     }
 
-    // 3. Merge (5% of progress)
     event.sender.send('ffmpeg:log', { jobId, msg: `🔗 PHASE 3: Merging segments into final stream...` });
     const concatListPath = path.join(chunkDir, 'list.txt');
     const concatList = segments.map(seg => `file 'out_${seg}'`).join('\n');
@@ -614,7 +683,7 @@ ipcMain.handle('ffmpeg:transcode', async (event, jobId, inputPath, format, quali
     } catch (e) {}
 
     return outputPath;
-  } catch (err) {
+  } catch (err: any) {
     event.sender.send('ffmpeg:log', { jobId, msg: `❌ CRITICAL ENGINE STALL: ${err.message}` });
     throw err;
   }

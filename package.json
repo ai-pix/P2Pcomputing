@@ -2,10 +2,11 @@
   "name": "transcode-net",
   "version": "1.1.1",
   "description": "P2P Distributed Video Transcoding Platform",
-  "main": "main.js",
+  "main": "dist/main.js",
   "scripts": {
-    "start": "node server/index.js",
-    "dev": "node server/index.js",
+    "build": "node copy-assets.js && tsc -p tsconfig.backend.json && tsc -p tsconfig.frontend.json",
+    "start": "node dist/server/index.js",
+    "dev": "tsc -p tsconfig.backend.json -w",
     "electron": "electron .",
     "dist": "electron-builder --win"
   },
@@ -19,8 +20,12 @@
     "ws": "^8.16.0"
   },
   "devDependencies": {
+    "@types/express": "^5.0.6",
+    "@types/node": "^25.9.1",
+    "@types/ws": "^8.18.1",
     "electron": "^42.1.0",
-    "electron-builder": "^26.8.1"
+    "electron-builder": "^26.8.1",
+    "typescript": "^6.0.3"
   },
   "build": {
     "appId": "com.transcodenet.app",

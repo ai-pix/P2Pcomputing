@@ -1,11 +1,19 @@
 /* ─── Transcoder Module — FFmpeg.wasm wrapper (self-hosted) ─── */
 class Transcoder {
+  ffmpeg: any;
+  loaded: boolean;
+  onLog: ((message: string) => void) | null;
+  onProgress: ((percent: number) => void) | null;
+  onLoadProgress: ((message: string, progress: number) => void) | null;
+  _loading: Promise<void> | null;
+
   constructor() {
     this.ffmpeg = null;
     this.loaded = false;
     this.onLog = null;
     this.onProgress = null;
     this.onLoadProgress = null;
+    this._loading = null;
   }
 
   async load() {
@@ -20,24 +28,21 @@ class Transcoder {
   async _doLoad() {
     if (this.onLoadProgress) this.onLoadProgress('Importing FFmpeg module...', 5);
 
-    // Import FFmpeg class and util from npm (served locally via node_modules or CDN fallback)
-    const { FFmpeg } = await import('https://cdn.jsdelivr.net/npm/@ffmpeg/ffmpeg@0.12.10/+esm');
-    const { toBlobURL } = await import('https://cdn.jsdelivr.net/npm/@ffmpeg/util@0.12.1/+esm');
+    const { FFmpeg } = await import('https://cdn.jsdelivr.net/npm/@ffmpeg/ffmpeg@0.12.10/+esm' as any);
+    const { toBlobURL } = await import('https://cdn.jsdelivr.net/npm/@ffmpeg/util@0.12.1/+esm' as any);
 
     if (this.onLoadProgress) this.onLoadProgress('Creating FFmpeg instance...', 15);
     this.ffmpeg = new FFmpeg();
 
-    this.ffmpeg.on('log', ({ message }) => {
+    this.ffmpeg.on('log', ({ message }: { message: string }) => {
       if (this.onLog) this.onLog(message);
     });
 
-    this.ffmpeg.on('progress', ({ progress, time }) => {
+    this.ffmpeg.on('progress', ({ progress }: { progress: number }) => {
       const pct = Math.round(progress * 100);
       if (this.onProgress) this.onProgress(pct);
     });
 
-    // Load all heavy files from localhost (self-hosted in /vendor/ffmpeg/)
-    // This is MUCH faster than CDN since files are served locally
     if (this.onLoadProgress) this.onLoadProgress('Loading FFmpeg core (local)...', 25);
     const coreURL = await toBlobURL('/vendor/ffmpeg/ffmpeg-core.js', 'text/javascript');
 
@@ -54,7 +59,7 @@ class Transcoder {
     this.loaded = true;
   }
 
-  getOutputArgs(format, quality) {
+  getOutputArgs(format: string, quality: string) {
     const scale = `-vf`;
     const scaleVal = `scale=-2:${quality}`;
 
@@ -72,46 +77,47 @@ class Transcoder {
     }
   }
 
-  async transcode(fileBlob, inputName, outputFormat, quality) {
+  async transcode(fileBlob: Blob, inputName: string, outputFormat: string, quality: string) {
     if (!this.loaded) await this.load();
 
-    const { fetchFile } = await import('https://cdn.jsdelivr.net/npm/@ffmpeg/util@0.12.1/+esm');
+    const { fetchFile } = await import('https://cdn.jsdelivr.net/npm/@ffmpeg/util@0.12.1/+esm' as any);
 
     const inputFileName = 'input' + this._getExtension(inputName);
     const outputFileName = 'output.' + outputFormat;
 
-    // Write input file to FFmpeg virtual filesystem
     const inputData = await fetchFile(fileBlob);
     await this.ffmpeg.writeFile(inputFileName, inputData);
 
-    // Build FFmpeg arguments
     const args = ['-i', inputFileName, ...this.getOutputArgs(outputFormat, quality), outputFileName];
 
     if (this.onLog) this.onLog(`ffmpeg ${args.join(' ')}`);
 
-    // Run transcoding
     await this.ffmpeg.exec(args);
 
-    // Read output
     const outputData = await this.ffmpeg.readFile(outputFileName);
     const outputBlob = new Blob([outputData.buffer], { type: this._getMimeType(outputFormat) });
 
-    // Cleanup
     await this.ffmpeg.deleteFile(inputFileName);
     await this.ffmpeg.deleteFile(outputFileName);
 
     return outputBlob;
   }
 
-  _getExtension(filename) {
-    const ext = filename.split('.').pop();
-    return ext ? '.' + ext : '.mp4';
+  _getExtension(name: string) {
+    const parts = name.split('.');
+    return parts.length > 1 ? '.' + parts.pop() : '';
   }
 
-  _getMimeType(format) {
-    const types = { mp4: 'video/mp4', webm: 'video/webm', avi: 'video/x-msvideo', mkv: 'video/x-matroska' };
-    return types[format] || 'video/mp4';
+  _getMimeType(format: string) {
+    switch (format) {
+      case 'mp4': return 'video/mp4';
+      case 'webm': return 'video/webm';
+      case 'avi': return 'video/x-msvideo';
+      case 'mkv': return 'video/x-matroska';
+      case 'webp': return 'image/webp';
+      case 'jpg': return 'image/jpeg';
+      case 'png': return 'image/png';
+      default: return 'application/octet-stream';
+    }
   }
 }
-
-const transcoder = new Transcoder();
