@@ -7,7 +7,7 @@ interface Window {
     getFileSize: (path: string) => Promise<number>;
     deleteFile: (path: string) => Promise<void>;
     saveOutputFile: (tempPath: string, defaultName: string) => Promise<{ canceled: boolean; filePath?: string }>;
-    transcode: (jobId: string, inputPath: string, format: string, quality: string, mediaType: string, useGpu?: boolean) => Promise<string>;
+    transcode: (jobId: string, inputPath: string, format: string, quality: string, mediaType: string, useGpu?: boolean, audioBitrate?: string) => Promise<string>;
     getHwInfo: () => Promise<{ encoder: string | null; label: string; model: string }>;
     getSystemStats: () => Promise<{ cpuLoad: number; totalMem: number; freeMem: number; memUsage: number; temp: number }>;
     getNodeIdentity: () => Promise<{ nodeId: string; nodeSecret: string }>;
@@ -22,5 +22,7 @@ interface Window {
     onUpdateDownloaded: (callback: (data: { version: string }) => void) => () => void;
     downloadUpdate: () => Promise<void>;
     installUpdate: () => Promise<void>;
+    runNetworkBenchmark: () => Promise<{ dlSpeed: number; ulSpeed: number }>;
+    onNetworkProgress: (callback: (data: { stage: 'download' | 'upload'; pct: number; speed: number }) => void) => () => void;
   };
 }

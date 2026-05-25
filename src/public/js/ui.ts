@@ -63,7 +63,12 @@ const UI = {
 
     zone.addEventListener('click', () => input.click());
     input.addEventListener('click', (e) => e.stopPropagation());
-    input.addEventListener('change', (e: any) => { if (e.target?.files?.length) onFile(e.target.files); });
+    input.addEventListener('change', (e: any) => { 
+      if (e.target?.files?.length) {
+        onFile(e.target.files);
+        e.target.value = ''; // Reset input value so the same file can be uploaded again
+      }
+    });
 
     zone.addEventListener('dragover', (e) => { e.preventDefault(); zone.classList.add('drag-over'); });
     zone.addEventListener('dragleave', () => zone.classList.remove('drag-over'));

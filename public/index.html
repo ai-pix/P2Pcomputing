@@ -6,6 +6,7 @@
   <meta name="description" content="TranscodeNet — Peer-to-peer distributed video transcoding. Upload your video, a compute provider transcodes it, all directly browser-to-browser.">
   <title>TranscodeNet — P2P Video Transcoding Dashboard</title>
   <link rel="stylesheet" href="css/styles.css">
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 </head>
 <body>
   <div class="mesh-bg"></div>
@@ -70,6 +71,14 @@
           <div style="margin-top: 10px; display: flex; justify-content: space-between; font-size: 0.8rem; font-weight: 700; color: var(--text-secondary); background: rgba(5,150,105,0.05); padding: 6px 12px; border-radius: 6px; border: 1px solid var(--border);">
             <span>💰 Balance:</span>
             <span id="accountBalanceVal" style="color: var(--emerald);">100.0 pts</span>
+          </div>
+          <div style="margin-top: 6px; display: flex; justify-content: space-between; font-size: 0.8rem; font-weight: 700; color: var(--text-secondary); background: rgba(5,150,105,0.05); padding: 6px 12px; border-radius: 6px; border: 1px solid var(--border);">
+            <span>🛡️ Reputation:</span>
+            <span id="accountReputationVal" style="color: var(--emerald);">80%</span>
+          </div>
+          <div style="margin-top: 10px;">
+            <label for="backupServersInput" style="font-size: 0.7rem; font-weight: 700; color: var(--text-muted); display: block; margin-bottom: 4px; text-transform: uppercase;">📡 Signaling Servers</label>
+            <input type="text" id="backupServersInput" style="width: 100%; background: rgba(0,0,0,0.15); border: 1px solid var(--border); color: var(--text-primary); font-size: 0.72rem; padding: 6px 8px; border-radius: 4px; font-family: var(--mono); box-sizing: border-box;" placeholder="ws://localhost:3000, ws://localhost:3001" onchange="app.updateSignalingUrls(this.value)">
           </div>
           <button class="btn btn-secondary btn-xs" id="addCreditsBtn" onclick="app.addTestCredits()" style="margin-top: 8px; width: 100%; font-size: 0.75rem; border-radius: 4px; padding: 4px;">+1000 Test Credits</button>
         </div>
@@ -148,6 +157,19 @@
               </div>
             </div>
 
+            <!-- Finished Card -->
+            <div class="glass-card" id="finishedCard" style="display:none; margin-top:24px; padding:24px;">
+              <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:16px;">
+                <h3 style="font-weight: 800; color: var(--emerald);">✅ Completed Jobs</h3>
+                <button class="btn btn-secondary btn-sm" id="clearFinishedBtn" onclick="app.clearFinished()">🗑 Clear Finished</button>
+              </div>
+              
+              <!-- Finished list container -->
+              <div id="finishedList" class="queue-list" style="display:flex; flex-direction:column; gap:12px; max-height:400px; overflow-y:auto; padding-right:4px;">
+                <!-- Finished items will be rendered dynamically here -->
+              </div>
+            </div>
+
           </div>
         </div>
 
@@ -179,15 +201,34 @@
                   <input type="checkbox" id="srvGpu" onchange="app.updateProviderServices()" style="accent-color: var(--amber); width: 18px; height: 18px; cursor: pointer;">
                   🚀 Hardware & TPU Acceleration
                 </label>
+                <label id="orchToggleLabel" style="display: flex; align-items: center; gap: 10px; cursor: pointer; font-size: 0.95rem; font-weight: 600; color: var(--emerald); transition: color 0.2s;">
+                  <input type="checkbox" id="srvOrch" onchange="app.toggleOrchestrator()" style="accent-color: var(--emerald); width: 18px; height: 18px; cursor: pointer;">
+                  🏛️ Orchestrator Mode (High-Tier)
+                </label>
               </div>
               <div id="hwInfoDisplay" style="margin-top: 12px; font-size: 0.85rem; color: var(--text-muted); display: none; align-items: center; gap: 8px;">
                 <span style="background: var(--amber); color: #000; padding: 2px 6px; border-radius: 4px; font-weight: 800; font-size: 0.7rem;">DETECTED</span>
                 <span id="detectedHwLabel">Scanning for hardware...</span>
               </div>
-              <div id="benchmarkDisplay" style="margin-top: 8px; font-size: 0.85rem; color: var(--text-muted); display: flex; align-items: center; gap: 8px;">
-                <span style="background: var(--emerald); color: #fff; padding: 2px 6px; border-radius: 4px; font-weight: 800; font-size: 0.7rem;">BENCHMARK</span>
-                <span id="benchmarkScoreVal">Score: Pending Test</span>
-                <button id="runBenchmarkBtn" class="btn btn-secondary btn-sm" style="padding: 2px 8px; font-size: 0.7rem; border-radius: 4px;" onclick="app.runBenchmark()">Run Test</button>
+              <div id="benchmarkDisplay" style="margin-top: 8px; font-size: 0.85rem; color: var(--text-muted); display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">
+                <div style="display: flex; align-items: center; gap: 8px;">
+                  <span style="background: var(--emerald); color: #fff; padding: 2px 6px; border-radius: 4px; font-weight: 800; font-size: 0.7rem;">CPU</span>
+                  <span id="benchmarkScoreVal">Score: Pending Test</span>
+                  <button id="runBenchmarkBtn" class="btn btn-secondary btn-sm" style="padding: 2px 8px; font-size: 0.7rem; border-radius: 4px;" onclick="app.runBenchmark()">Run CPU Test</button>
+                </div>
+                <div style="display: flex; align-items: center; gap: 8px; margin-left: 12px;">
+                  <span style="background: var(--emerald); color: #fff; padding: 2px 6px; border-radius: 4px; font-weight: 800; font-size: 0.7rem;">NET</span>
+                  <div style="display: flex; flex-direction: column; gap: 2px;">
+                    <span id="networkScoreVal" style="font-size: 0.75rem;">Upload: Pending</span>
+                    <div id="netProgressContainer" style="display: none; width: 100px; height: 4px; background: rgba(255,255,255,0.1); border-radius: 2px; overflow: hidden;">
+                      <div id="netProgressBar" style="width: 0%; height: 100%; background: var(--emerald); transition: width 0.2s;"></div>
+                    </div>
+                  </div>
+                  <button id="runNetBtn" class="btn btn-secondary btn-sm" style="padding: 2px 8px; font-size: 0.7rem; border-radius: 4px;" onclick="app.runNetworkBenchmark()">Run Speed Test</button>
+                </div>
+                <div style="display: flex; align-items: center; gap: 8px; margin-left: 12px;">
+                  <span id="nodeTierLabel" style="background: var(--amber); color: #000; padding: 2px 6px; border-radius: 4px; font-weight: 800; font-size: 0.7rem;">Tier: Basic</span>
+                </div>
               </div>
 
               <!-- Provider Policies -->
@@ -268,6 +309,40 @@
               <div class="policy-badges" style="margin-top: 16px; display: flex; gap: 12px; font-size: 0.8rem;">
                 <span class="badge" id="policyCpuBadge" style="background: rgba(16, 185, 129, 0.1); color: var(--emerald); padding: 4px 8px; border-radius: 4px; border: 1px solid rgba(16, 185, 129, 0.2);">✓ CPU Policy Pass</span>
                 <span class="badge" id="policySizeBadge" style="background: rgba(16, 185, 129, 0.1); color: var(--emerald); padding: 4px 8px; border-radius: 4px; border: 1px solid rgba(16, 185, 129, 0.2);">✓ Size Policy Pass</span>
+              </div>
+            </div>
+
+            <!-- Analytics & Charts Panel -->
+            <div class="glass-card" id="analyticsCard" style="margin-top: 24px; margin-bottom: 24px; display: none;">
+              <h4 style="margin-bottom: 20px; font-weight: 800; font-size: 0.95rem; text-transform: uppercase; letter-spacing: 0.05em; color: var(--emerald);">📈 Live Performance & Earnings Analytics</h4>
+              <div class="analytics-grid" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 24px;">
+                <div class="chart-container" style="position: relative; height: 180px; background: rgba(0,0,0,0.15); border-radius: 12px; padding: 12px; border: 1px solid rgba(255,255,255,0.02); display: flex; flex-direction: column;">
+                  <div style="font-size: 0.78rem; font-weight: 700; margin-bottom: 8px; color: var(--text-secondary); display: flex; justify-content: space-between;">
+                    <span>Transcode Speed</span>
+                    <span id="chartFpsAvg" style="color:var(--emerald);">Avg: — FPS</span>
+                  </div>
+                  <div style="flex: 1; min-height: 0; position: relative;">
+                    <canvas id="fpsChart" style="width: 100%; height: 100%;"></canvas>
+                  </div>
+                </div>
+                <div class="chart-container" style="position: relative; height: 180px; background: rgba(0,0,0,0.15); border-radius: 12px; padding: 12px; border: 1px solid rgba(255,255,255,0.02); display: flex; flex-direction: column;">
+                  <div style="font-size: 0.78rem; font-weight: 700; margin-bottom: 8px; color: var(--text-secondary); display: flex; justify-content: space-between;">
+                    <span>Earnings Growth</span>
+                    <span id="chartTotalEarnings" style="color:var(--emerald);">Total: — pts</span>
+                  </div>
+                  <div style="flex: 1; min-height: 0; position: relative;">
+                    <canvas id="earningsChart" style="width: 100%; height: 100%;"></canvas>
+                  </div>
+                </div>
+                <div class="chart-container" style="position: relative; height: 180px; background: rgba(0,0,0,0.15); border-radius: 12px; padding: 12px; border: 1px solid rgba(255,255,255,0.02); display: flex; flex-direction: column;">
+                  <div style="font-size: 0.78rem; font-weight: 700; margin-bottom: 8px; color: var(--text-secondary); display: flex; justify-content: space-between;">
+                    <span>WebRTC Throughput</span>
+                    <span id="chartBandwidthCur" style="color:var(--emerald);">Current: 0.0 MB/s</span>
+                  </div>
+                  <div style="flex: 1; min-height: 0; position: relative;">
+                    <canvas id="bandwidthChart" style="width: 100%; height: 100%;"></canvas>
+                  </div>
+                </div>
               </div>
             </div>
 

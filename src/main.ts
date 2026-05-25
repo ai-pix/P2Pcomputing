@@ -188,41 +188,65 @@ let gpuModelName = 'Standard CPU';
 
 async function detectHardwareAcceleration(): Promise<string | null> {
   return new Promise((resolve) => {
+    if (process.platform !== 'win32') {
+      console.log('Skipping Windows WMI GPU lookup (non-Windows system)');
+      detectFFmpegEncoders(resolve);
+      return;
+    }
+
     const gpuNameProc = spawn('powershell.exe', ['-NoProfile', '-Command', 'Get-CimInstance Win32_VideoController | Select-Object -ExpandProperty Name']);
     let gpuOutput = '';
+    
     gpuNameProc.stdout.on('data', (data) => gpuOutput += data.toString());
-    gpuNameProc.on('close', () => {
-      const names = gpuOutput.trim().split(/\r?\n/).filter(n => n.trim());
-      if (names.length > 0) {
-        gpuModelName = names.find(n => n.includes('NVIDIA') || n.includes('AMD')) || names[0];
-      }
-
-      const encodersToTry = [
-        { name: 'h264_nvenc', label: 'NVIDIA NVENC' },
-        { name: 'h264_amf', label: 'AMD AMF' },
-        { name: 'h264_qsv', label: 'Intel QuickSync' },
-        { name: 'h264_vulkan', label: 'Vulkan/TPU Accelerator' },
-        { name: 'h264_mf', label: 'Windows Media Foundation' },
-        { name: 'h264_vaapi', label: 'Generic VAAPI' }
-      ];
-
-      const args = ['-encoders'];
-      const ffmpegProc = spawn(ffmpegPath, args);
-      let output = '';
-
-      ffmpegProc.stdout.on('data', (data) => output += data.toString());
-      ffmpegProc.on('close', () => {
-        for (const enc of encodersToTry) {
-          if (output.includes(enc.name)) {
-            bestHwEncoder = enc.name;
-            bestHwLabel = enc.label;
-            console.log(`🚀 Hardware Acceleration Detected: ${enc.label} (${enc.name}) on ${gpuModelName}`);
-            break;
-          }
-        }
-        resolve(bestHwEncoder);
-      });
+    
+    gpuNameProc.on('error', (err) => {
+      console.log('WMI GPU lookup process error, falling back to direct encoder query:', err.message);
+      detectFFmpegEncoders(resolve);
     });
+    
+    gpuNameProc.on('close', (code) => {
+      if (code === 0) {
+        const names = gpuOutput.trim().split(/\r?\n/).filter(n => n.trim());
+        if (names.length > 0) {
+          gpuModelName = names.find(n => n.includes('NVIDIA') || n.includes('AMD')) || names[0];
+        }
+      }
+      detectFFmpegEncoders(resolve);
+    });
+  });
+}
+
+function detectFFmpegEncoders(resolve: (value: string | null) => void) {
+  const encodersToTry = [
+    { name: 'h264_nvenc', label: 'NVIDIA NVENC' },
+    { name: 'h264_amf', label: 'AMD AMF' },
+    { name: 'h264_qsv', label: 'Intel QuickSync' },
+    { name: 'h264_vulkan', label: 'Vulkan/TPU Accelerator' },
+    { name: 'h264_mf', label: 'Windows Media Foundation' },
+    { name: 'h264_vaapi', label: 'Generic VAAPI' }
+  ];
+
+  const args = ['-encoders'];
+  const ffmpegProc = spawn(ffmpegPath, args);
+  let output = '';
+
+  ffmpegProc.stdout.on('data', (data) => output += data.toString());
+  
+  ffmpegProc.on('error', (err) => {
+    console.error('Failed to spawn FFmpeg process for encoder check:', err.message);
+    resolve(null);
+  });
+
+  ffmpegProc.on('close', () => {
+    for (const enc of encodersToTry) {
+      if (output.includes(enc.name)) {
+        bestHwEncoder = enc.name;
+        bestHwLabel = enc.label;
+        console.log(`🚀 Hardware Acceleration Detected: ${enc.label} (${enc.name}) on ${gpuModelName}`);
+        break;
+      }
+    }
+    resolve(bestHwEncoder);
   });
 }
 
@@ -353,6 +377,67 @@ ipcMain.handle('system:runBenchmark', async (event, useGpu = false) => {
   });
 });
 
+ipcMain.handle('system:runNetworkBenchmark', async (event) => {
+  const baseUrl = 'http://localhost:3000';
+  
+  // Phase 1: Download
+  let dlStart = performance.now();
+  let dlSpeed = 0;
+  let dlBytes = 0;
+  try {
+    const dlRes = await fetch(`${baseUrl}/vendor/ffmpeg/ffmpeg-core.wasm?t=${Date.now()}`);
+    if (!dlRes.ok) throw new Error(`Download failed with status ${dlRes.status}`);
+    
+    const reader = dlRes.body?.getReader();
+    const totalDl = parseInt(dlRes.headers.get('content-length') || '32129114', 10);
+    
+    if (reader) {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        dlBytes += value.length;
+        const pct = Math.min(Math.round((dlBytes / totalDl) * 100), 100);
+        
+        const now = performance.now();
+        const elapsed = Math.max((now - dlStart) / 1000, 0.001);
+        const mbps = Math.round((dlBytes * 8 / (1024 * 1024 * elapsed)) * 10) / 10;
+        
+        event.sender.send('system:netProgress', { stage: 'download', pct: pct / 2, speed: mbps });
+      }
+    }
+    const dlDuration = Math.max((performance.now() - dlStart) / 1000, 0.001);
+    dlSpeed = Math.round((dlBytes * 8 / (1024 * 1024 * dlDuration)) * 10) / 10;
+  } catch (err: any) {
+    console.error('Download benchmark error:', err);
+    throw new Error('Download phase failed: ' + err.message);
+  }
+  
+  // Phase 2: Upload
+  let ulStart = performance.now();
+  let ulSpeed = 0;
+  try {
+    const ulData = crypto.randomBytes(10 * 1024 * 1024);
+    
+    event.sender.send('system:netProgress', { stage: 'upload', pct: 75, speed: 0 });
+    
+    const ulRes = await fetch(`${baseUrl}/api/test-upload`, {
+      method: 'POST',
+      body: ulData
+    });
+    if (!ulRes.ok) throw new Error(`Upload failed with status ${ulRes.status}`);
+    
+    const ulDuration = Math.max((performance.now() - ulStart) / 1000, 0.001);
+    ulSpeed = Math.round((10 * 8 / ulDuration) * 10) / 10;
+    
+    event.sender.send('system:netProgress', { stage: 'upload', pct: 100, speed: ulSpeed });
+  } catch (err: any) {
+    console.error('Upload benchmark error:', err);
+    throw new Error('Upload phase failed: ' + err.message);
+  }
+  
+  return { dlSpeed, ulSpeed };
+});
+
 ipcMain.handle('notification:send', (event, title, message) => {
   showTrayNotification(title, message);
 });
@@ -452,8 +537,9 @@ ipcMain.handle('fs:finishTempWrite', (event, jobId) => {
 
 ipcMain.handle('fs:getSize', (event, filePath) => {
   try {
-    if (!filePath.startsWith(BASE_TEMP_DIR)) return 0;
-    const stats = fs.statSync(filePath);
+    const resolvedPath = path.resolve(filePath);
+    if (!resolvedPath.startsWith(BASE_TEMP_DIR)) return 0;
+    const stats = fs.statSync(resolvedPath);
     return stats.size;
   } catch (e) {
     return 0;
@@ -462,11 +548,12 @@ ipcMain.handle('fs:getSize', (event, filePath) => {
 
 ipcMain.handle('fs:readChunk', (event, filePath, start, end) => {
   return new Promise<Buffer>((resolve, reject) => {
-    if (!filePath.startsWith(BASE_TEMP_DIR)) {
+    const resolvedPath = path.resolve(filePath);
+    if (!resolvedPath.startsWith(BASE_TEMP_DIR)) {
       return reject(new Error('Access denied: File outside sandbox'));
     }
 
-    const stream = fs.createReadStream(filePath, { start, end });
+    const stream = fs.createReadStream(resolvedPath, { start, end });
     const chunks: Buffer[] = [];
     
     stream.on('data', (chunk) => chunks.push(Buffer.from(chunk)));
@@ -479,30 +566,115 @@ ipcMain.handle('fs:readChunk', (event, filePath, start, end) => {
 
 ipcMain.handle('fs:delete', (event, filePath) => {
   try {
-    if (filePath.startsWith(BASE_TEMP_DIR) && fs.existsSync(filePath)) {
-      fs.unlinkSync(filePath);
-      tempFiles.delete(filePath);
+    const resolvedPath = path.resolve(filePath);
+    if (resolvedPath.startsWith(BASE_TEMP_DIR) && fs.existsSync(resolvedPath)) {
+      fs.unlinkSync(resolvedPath);
+      tempFiles.delete(resolvedPath);
     }
   } catch (e) {
     console.error(e);
   }
 });
 
-ipcMain.handle('fs:saveOutputFile', async (event, filePath, defaultName = 'output.bin') => {
-  if (!filePath.startsWith(BASE_TEMP_DIR) || !fs.existsSync(filePath)) {
+ipcMain.handle('fs:saveOutputFile', async (event, tempPath, defaultName) => {
+  const resolvedPath = path.resolve(tempPath);
+  if (!resolvedPath.startsWith(BASE_TEMP_DIR)) {
     throw new Error('Access denied: File outside sandbox');
   }
-
-  const { canceled, filePath: destinationPath } = await dialog.showSaveDialog({
-    defaultPath: defaultName
+  
+  if (!mainWindow) return { canceled: true };
+  
+  const { filePath, canceled } = await dialog.showSaveDialog(mainWindow, {
+    defaultPath: defaultName,
+    title: 'Save Transcoded Media File'
   });
-
-  if (canceled || !destinationPath) {
+  
+  if (canceled || !filePath) {
     return { canceled: true };
   }
+  
+  try {
+    fs.copyFileSync(resolvedPath, filePath);
+    return { canceled: false, filePath };
+  } catch (err: any) {
+    console.error('Failed to copy file:', err);
+    throw err;
+  }
+});
 
-  fs.copyFileSync(filePath, destinationPath);
-  return { canceled: false, filePath: destinationPath };
+ipcMain.handle('ffmpeg:slice', async (event, jobId, inputPath) => {
+  const resolvedPath = path.resolve(inputPath);
+  if (!resolvedPath.startsWith(BASE_TEMP_DIR)) {
+    throw new Error('Access denied: Input file outside sandbox');
+  }
+  inputPath = resolvedPath;
+
+  const chunkDir = path.join(BASE_TEMP_DIR, `orch_chunks_${jobId}`);
+  if (fs.existsSync(chunkDir)) {
+    // Clean up if exists
+    const files = fs.readdirSync(chunkDir);
+    for (const f of files) fs.unlinkSync(path.join(chunkDir, f));
+  } else {
+    fs.mkdirSync(chunkDir, { recursive: true });
+  }
+
+  event.sender.send('ffmpeg:log', { jobId, msg: `🔪 Orchestrator: Slicing video into 15s segments...` });
+  
+  // Slicing into 15s chunks using stream copy (instant)
+  const args = [
+    '-i', inputPath, 
+    '-c', 'copy', 
+    '-map', '0', 
+    '-f', 'segment', 
+    '-segment_time', '15', 
+    '-reset_timestamps', '1', 
+    path.join(chunkDir, 'seg_%03d.mp4')
+  ];
+
+  await runFFmpeg(args, event, jobId);
+
+  const chunks = fs.readdirSync(chunkDir)
+    .filter(f => f.startsWith('seg_'))
+    .sort()
+    .map(f => ({
+      name: f,
+      path: path.join(chunkDir, f)
+    }));
+
+  return { chunkDir, chunks };
+});
+
+ipcMain.handle('ffmpeg:merge', async (event, jobId, chunkDir, outputFormat) => {
+  const outputPath = getSafePath(jobId, `final.${outputFormat}`, true);
+  const concatListPath = path.join(chunkDir, 'list.txt');
+  
+  const files = fs.readdirSync(chunkDir).filter(f => f.startsWith('out_')).sort();
+  const concatList = files.map(f => `file '${f}'`).join('\n');
+  fs.writeFileSync(concatListPath, concatList);
+
+  event.sender.send('ffmpeg:log', { jobId, msg: `🔗 Orchestrator: Merging ${files.length} chunks into final file...` });
+
+  const args = ['-f', 'concat', '-safe', '0', '-i', concatListPath, '-c', 'copy', '-y', outputPath];
+  await runFFmpeg(args, event, jobId);
+
+  // Clean up chunk dir
+  try {
+    const allFiles = fs.readdirSync(chunkDir);
+    for (const f of allFiles) fs.unlinkSync(path.join(chunkDir, f));
+    fs.rmdirSync(chunkDir);
+  } catch (e) {}
+
+  return outputPath;
+});
+
+ipcMain.handle('fs:saveChunk', async (event, jobId, chunkDir, chunkName, buffer) => {
+  const finalPath = path.join(chunkDir, `out_${chunkName}`);
+  if (typeof buffer === 'string' && fs.existsSync(buffer)) {
+    fs.copyFileSync(buffer, finalPath);
+  } else {
+    fs.writeFileSync(finalPath, Buffer.from(buffer));
+  }
+  return finalPath;
 });
 
 function runFFmpeg(args: string[], event: any, jobId: string, progressOffset = 0, progressScale = 1): Promise<number> {
@@ -539,10 +711,12 @@ function runFFmpeg(args: string[], event: any, jobId: string, progressOffset = 0
   });
 }
 
-ipcMain.handle('ffmpeg:transcode', async (event, jobId, inputPath, format, quality, mediaType = 'video', useGpu = false) => {
-  if (!inputPath.startsWith(BASE_TEMP_DIR)) {
+ipcMain.handle('ffmpeg:transcode', async (event, jobId, inputPath, format, quality, mediaType = 'video', useGpu = false, audioBitrate = '128k') => {
+  const resolvedPath = path.resolve(inputPath);
+  if (!resolvedPath.startsWith(BASE_TEMP_DIR)) {
     throw new Error('Access denied: Input file outside sandbox');
   }
+  inputPath = resolvedPath;
 
   const outputPath = getSafePath(jobId, `out.${format}`, true);
   tempFiles.add(outputPath);
@@ -577,6 +751,16 @@ ipcMain.handle('ffmpeg:transcode', async (event, jobId, inputPath, format, quali
   const fileSizeMB = stats.size / (1024 * 1024);
   const BYPASS_THRESHOLD_MB = 100;
 
+  // Build audio and video resolution filters
+  let audioArgs: string[] = [];
+  if (audioBitrate === 'mute') {
+    audioArgs = ['-an'];
+  } else {
+    audioArgs = ['-c:a', 'aac', '-b:a', audioBitrate];
+  }
+
+  const vfArgs = quality === 'original' ? ['-vf', 'format=yuv420p'] : ['-vf', `scale=-2:${quality},format=yuv420p`];
+
   if (fileSizeMB < BYPASS_THRESHOLD_MB) {
     event.sender.send('ffmpeg:log', { jobId, msg: `⚡ Small file detected (${fileSizeMB.toFixed(1)}MB < ${BYPASS_THRESHOLD_MB}MB). Bypassing parallel chunk engine...` });
     let args: string[];
@@ -586,11 +770,11 @@ ipcMain.handle('ffmpeg:transcode', async (event, jobId, inputPath, format, quali
       event.sender.send('ffmpeg:log', { jobId, msg: `⚡ Processing video using GPU...` });
       try {
         if (bestHwEncoder === 'h264_nvenc') {
-          args = ['-i', inputPath, '-vf', `scale=-2:${quality},format=yuv420p`, '-c:v', 'h264_nvenc', '-preset', 'p1', '-rc', 'vbr', '-cq', '28', '-tune', 'ull', '-zerolatency', '1', '-c:a', 'aac', '-y', outputPath];
+          args = ['-i', inputPath, ...vfArgs, '-c:v', 'h264_nvenc', '-preset', 'p1', '-rc', 'vbr', '-cq', '28', '-tune', 'ull', '-zerolatency', '1', ...audioArgs, '-y', outputPath];
         } else if (bestHwEncoder === 'h264_qsv') {
-          args = ['-i', inputPath, '-vf', `scale=-2:${quality},format=yuv420p`, '-c:v', 'h264_qsv', '-preset', 'veryfast', '-global_quality', '28', '-c:a', 'aac', '-y', outputPath];
+          args = ['-i', inputPath, ...vfArgs, '-c:v', 'h264_qsv', '-preset', 'veryfast', '-global_quality', '28', ...audioArgs, '-y', outputPath];
         } else {
-          args = ['-i', inputPath, '-vf', `scale=-2:${quality},format=yuv420p`, '-c:v', bestHwEncoder, '-c:a', 'aac', '-y', outputPath];
+          args = ['-i', inputPath, ...vfArgs, '-c:v', bestHwEncoder, ...audioArgs, '-y', outputPath];
         }
         await runFFmpeg(args, event, jobId, 0, 1);
         success = true;
@@ -601,7 +785,7 @@ ipcMain.handle('ffmpeg:transcode', async (event, jobId, inputPath, format, quali
 
     if (!success) {
       event.sender.send('ffmpeg:log', { jobId, msg: `🐌 Processing video using CPU (Robust Mode)...` });
-      args = ['-i', inputPath, '-vf', `scale=-2:${quality},format=yuv420p`, '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '28', '-c:a', 'aac', '-y', outputPath];
+      args = ['-i', inputPath, ...vfArgs, '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '28', ...audioArgs, '-y', outputPath];
       await runFFmpeg(args, event, jobId, 0, 1);
     }
 
@@ -642,11 +826,11 @@ ipcMain.handle('ffmpeg:transcode', async (event, jobId, inputPath, format, quali
           event.sender.send('ffmpeg:log', { jobId, msg: `⚡ Processing ${seg} using GPU...` });
           try {
             if (bestHwEncoder === 'h264_nvenc') {
-              args = ['-i', segInput, '-vf', `scale=-2:${quality},format=yuv420p`, '-c:v', 'h264_nvenc', '-preset', 'p1', '-rc', 'vbr', '-cq', '28', '-tune', 'ull', '-zerolatency', '1', '-c:a', 'aac', '-y', segOutput];
+              args = ['-i', segInput, ...vfArgs, '-c:v', 'h264_nvenc', '-preset', 'p1', '-rc', 'vbr', '-cq', '28', '-tune', 'ull', '-zerolatency', '1', ...audioArgs, '-y', segOutput];
             } else if (bestHwEncoder === 'h264_qsv') {
-              args = ['-i', segInput, '-vf', `scale=-2:${quality},format=yuv420p`, '-c:v', 'h264_qsv', '-preset', 'veryfast', '-global_quality', '28', '-c:a', 'aac', '-y', segOutput];
+              args = ['-i', segInput, ...vfArgs, '-c:v', 'h264_qsv', '-preset', 'veryfast', '-global_quality', '28', ...audioArgs, '-y', segOutput];
             } else {
-              args = ['-i', segInput, '-vf', `scale=-2:${quality},format=yuv420p`, '-c:v', bestHwEncoder, '-c:a', 'aac', '-y', segOutput];
+              args = ['-i', segInput, ...vfArgs, '-c:v', bestHwEncoder, ...audioArgs, '-y', segOutput];
             }
             await runFFmpeg(args, event, jobId, progOffset, progScale);
             success = true;
@@ -657,7 +841,7 @@ ipcMain.handle('ffmpeg:transcode', async (event, jobId, inputPath, format, quali
 
         if (!success) {
           event.sender.send('ffmpeg:log', { jobId, msg: `🐌 Processing ${seg} using CPU (Robust Mode)...` });
-          args = ['-i', segInput, '-vf', `scale=-2:${quality},format=yuv420p`, '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '28', '-c:a', 'aac', '-y', segOutput];
+          args = ['-i', segInput, ...vfArgs, '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '28', ...audioArgs, '-y', segOutput];
           await runFFmpeg(args, event, jobId, progOffset, progScale);
         }
 

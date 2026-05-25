@@ -87,6 +87,21 @@ body {
   padding: 32px 24px;
   box-shadow: 4px 0 20px rgba(15, 23, 42, 0.015);
 }
+@media (min-width: 901px) {
+  .sidebar {
+    position: fixed;
+    left: 0;
+    top: 0;
+    bottom: 0;
+    z-index: 100;
+    height: 100vh;
+    overflow-y: hidden;
+  }
+  .is-electron .sidebar {
+    top: 36px;
+    height: calc(100vh - 36px);
+  }
+}
 .sidebar-header {
   margin-bottom: 40px;
 }
@@ -110,6 +125,7 @@ body {
   flex-direction: column;
   gap: 8px;
   flex: 1;
+  overflow-y: auto;
 }
 .nav-item {
   width: 100%;
@@ -199,6 +215,11 @@ body {
   display: flex;
   flex-direction: column;
   padding: 48px 48px;
+}
+@media (min-width: 901px) {
+  .main-content {
+    margin-left: 280px;
+  }
 }
 .main-header {
   display: flex;
@@ -991,9 +1012,7 @@ body {
   min-height: calc(100vh - 36px);
 }
 
-.is-electron .sidebar {
-  min-height: calc(100vh - 36px);
-}
+/* Sidebar minimum height handled within media queries to support fixed layout */
 
 .titlebar-drag {
   display: flex;

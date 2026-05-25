@@ -1,6 +1,6 @@
 {
   "name": "transcode-net",
-  "version": "0.0.2-alpha",
+  "version": "0.0.3-alpha",
   "description": "P2P Distributed Video Transcoding Platform",
   "main": "dist/main.js",
   "scripts": {

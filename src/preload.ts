@@ -12,7 +12,10 @@ contextBridge.exposeInMainWorld('api', {
   saveOutputFile: (tempPath: string, defaultName: string) => ipcRenderer.invoke('fs:saveOutputFile', tempPath, defaultName),
 
   // FFmpeg
-  transcode: (jobId: string, inputPath: string, format: string, quality: string, mediaType: string, useGpu = false) => ipcRenderer.invoke('ffmpeg:transcode', jobId, inputPath, format, quality, mediaType, useGpu),
+  transcode: (jobId: string, inputPath: string, format: string, quality: string, mediaType: string, useGpu = false, audioBitrate = '128k') => ipcRenderer.invoke('ffmpeg:transcode', jobId, inputPath, format, quality, mediaType, useGpu, audioBitrate),
+  sliceVideo: (jobId: string, inputPath: string) => ipcRenderer.invoke('ffmpeg:slice', jobId, inputPath),
+  mergeVideo: (jobId: string, chunkDir: string, format: string) => ipcRenderer.invoke('ffmpeg:merge', jobId, chunkDir, format),
+  saveChunk: (jobId: string, chunkDir: string, chunkName: string, buffer: any) => ipcRenderer.invoke('fs:saveChunk', jobId, chunkDir, chunkName, buffer),
   getHwInfo: () => ipcRenderer.invoke('ffmpeg:getHwInfo'),
   getSystemStats: () => ipcRenderer.invoke('system:getStats'),
   getNodeIdentity: () => ipcRenderer.invoke('identity:get'),
@@ -48,5 +51,12 @@ contextBridge.exposeInMainWorld('api', {
     return () => { ipcRenderer.off('update:downloaded', handler); };
   },
   downloadUpdate: () => ipcRenderer.invoke('update:download'),
-  installUpdate: () => ipcRenderer.invoke('update:install')
+  installUpdate: () => ipcRenderer.invoke('update:install'),
+  
+  runNetworkBenchmark: () => ipcRenderer.invoke('system:runNetworkBenchmark'),
+  onNetworkProgress: (callback: (data: { stage: 'download' | 'upload'; pct: number; speed: number }) => void) => {
+    const handler = (e: any, data: any) => callback(data);
+    ipcRenderer.on('system:netProgress', handler);
+    return () => { ipcRenderer.off('system:netProgress', handler); };
+  }
 });

@@ -2,12 +2,14 @@
 const CHUNK_SIZE = 256 * 1024; // 256KB chunks
 
 class PeerConnection {
+  static bytesTransferred = 0;
   jobId: string;
   pc: RTCPeerConnection | null;
   dataChannel: RTCDataChannel | null;
   onProgress: ((stage: 'sending' | 'receiving' | 'transcoding', percent: number) => void) | null;
   onFileReceived: ((fileData: any, meta: any, isNative: boolean) => void) | null;
   onConnected: (() => void) | null;
+  onDisconnected: (() => void) | null;
   _connected: boolean;
   _sending: boolean;
   remoteId?: string;
@@ -29,6 +31,7 @@ class PeerConnection {
     this.onProgress = null;
     this.onFileReceived = null;
     this.onConnected = null;
+    this.onDisconnected = null;
     this._connected = false;
     this._sending = false;
 
@@ -171,6 +174,7 @@ class PeerConnection {
 
           this.dataChannel.send(chunk);
           offset += chunk.byteLength;
+          PeerConnection.bytesTransferred += chunk.byteLength;
 
           if (this.onProgress) this.onProgress('sending', (offset / fileObj.size) * 100);
 
@@ -233,6 +237,7 @@ class PeerConnection {
           
           this.dataChannel.send(chunk);
           offset += chunk.byteLength;
+          PeerConnection.bytesTransferred += chunk.byteLength;
 
           if (this.onProgress) this.onProgress('sending', (offset / fileSize) * 100);
 
@@ -296,10 +301,14 @@ class PeerConnection {
           } else if (msg.type === 'transcode-progress') {
             if (this.onProgress) this.onProgress('transcoding', msg.progress);
           }
-        } catch (e) {}
+        } catch (e: any) {
+          console.error('DataChannel message processing error:', e);
+          if (this.onDisconnected) this.onDisconnected();
+        }
       } else {
         // Binary chunk
         this._receivedSize += event.data.byteLength;
+        PeerConnection.bytesTransferred += event.data.byteLength;
         if (this._isNative) {
           const chunk = event.data;
           this._writeChain = this._writeChain.then(async () => {
@@ -321,8 +330,14 @@ class PeerConnection {
       }
     };
 
-    channel.onerror = (e) => console.error('DataChannel error:', e);
-    channel.onclose = () => console.log('DataChannel closed');
+    channel.onerror = (e) => {
+      console.error('DataChannel error:', e);
+      if (this.onDisconnected) this.onDisconnected();
+    };
+    channel.onclose = () => {
+      console.log('DataChannel closed');
+      if (this.onDisconnected) this.onDisconnected();
+    };
   }
 
   /* Send transcode progress to remote peer */
@@ -333,7 +348,11 @@ class PeerConnection {
   }
 
   close() {
-    if (this.dataChannel) this.dataChannel.close();
+    if (this.dataChannel) {
+      this.dataChannel.onclose = null;
+      this.dataChannel.onerror = null;
+      this.dataChannel.close();
+    }
     if (this.pc) this.pc.close();
     this.pc = null;
     this.dataChannel = null;

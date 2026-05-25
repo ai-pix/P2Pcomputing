@@ -6,19 +6,18 @@ TranscodeNet is a decentralized, peer-to-peer (P2P) platform designed to distrib
 
 Get the latest alpha version of TranscodeNet:
 
-- **[Windows (v0.0.2-alpha)](https://github.com/ai-pix/P2Pcomputing/releases/download/v0.0.2-alpha/TranscodeNet-Setup-0.0.2-alpha.exe)**
+- **[Windows (v0.0.3-alpha)](https://github.com/ai-pix/P2Pcomputing/releases/download/v0.0.3-alpha/TranscodeNet-Setup-0.0.3-alpha.exe)**
 
 ## 🚀 Features
 
 -   **Decentralized Transcoding:** No central server handles the transcoding. Jobs are distributed directly between peers.
 -   **P2P Communication:** Uses WebRTC for secure, direct data transfer between Clients and Providers.
 -   **Native FFmpeg Performance:** Utilizes native FFmpeg binaries via Electron for high-performance transcoding on worker nodes.
--   **Multi-Format Support:**
-    -   **Video:** MP4 (H.264), WebM (VP9), AVI, MKV.
-    -   **Image:** WebP, JPG, PNG.
--   **Cross-Platform Client:** Built with Electron, providing a consistent experience across Windows, macOS, and Linux.
--   **Real-time Monitoring:** Track progress, logs, and network statistics in real-time.
--   **Auto-Updates:** Integrated auto-updater to keep the client software current.
+-   **Economic Incentives (15% Orchestrator Commission):** Orchestrator nodes coordinate segment slices and retain a 15% coordination fee from sub-job segment rewards.
+-   **Work Verification:** Shifted validation authority to the client with a 30-second auto-complete fallback timeout to protect worker rewards.
+-   **Media Privacy (Secure Route):** Restricts worker matchmaking for secure jobs to nodes with a reputation score &ge; 95 and benchmark score &ge; 150.
+-   **Dynamic Signaling Failover:** Automatic connection cycling to backup signaling servers if the primary one goes offline.
+-   **Orchestrator Worker Selection:** Orchestrator nodes take direct charge of matchmaking, target routing sub-jobs specifically to capable workers.
 
 ## 🏗 Architecture
 
@@ -86,6 +85,22 @@ npm run electron
 -   **Transcoding Engine:** [FFmpeg](https://ffmpeg.org/) (via `ffmpeg-static`)
 -   **Signaling:** [WebSockets](https://github.com/websockets/ws)
 -   **Server:** [Express](https://expressjs.com/)
+
+## 📋 Changelog
+
+### v0.0.3-alpha (Current Release)
+- **Economic Incentive Uplifts**: 15% Orchestrator fee retention on Worker segment payouts.
+- **Client-Led Work Verification**: Handled output validation and client-side confirmation/rejection signaling, backed by a 30-second server auto-complete timeout to protect workers.
+- **Secure Transcode Routing**: Matchmaking blocks `'secure'` jobs to workers unless they have reputation >= 95 and benchmark >= 150. Added `reputationScore` tracking in DB (bounds `[0, 100]`, default `80`, `+1` on success, `-10` on failures).
+- **Orchestrator Worker Selection**: Shifted worker selection logic from server to Orchestrator nodes. Orchestrators assign chunks to specific workers from their probed pool of capable workers.
+- **Decentralized Signaling Failover**: Dynamic signaling URL backup array (`wsUrls`) that automatically rotates/reconnects on websocket closed/error events.
+- **UI Enhancements**: Adjusted desktop CSS layout to keep status indicators, balance, reputation, and signaling URL input fixed in the bottom-left corner of the sidebar, making navigation scrollable.
+
+### v0.0.2-alpha
+- Migrated codebase to TypeScript.
+- Matchmaking memory leaks and status sync issue fixes.
+- Optimized hardware benchmarking.
+- Added testing credits button.
 
 ## 📜 License
 

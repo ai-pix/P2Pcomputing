@@ -10,6 +10,7 @@ export interface UserAccount {
   benchmarkScore: number;
   jobsCompleted: number;
   bytesProcessed: number;
+  reputationScore: number;
 }
 
 export interface DatabaseSchema {
@@ -71,7 +72,8 @@ export const db = {
       points: 100.0,
       benchmarkScore: 0,
       jobsCompleted: 0,
-      bytesProcessed: 0
+      bytesProcessed: 0,
+      reputationScore: 80
     };
 
     users[nodeId] = newUser;
@@ -113,6 +115,8 @@ export const db = {
 
     provider.jobsCompleted = (provider.jobsCompleted || 0) + 1;
     provider.bytesProcessed = (provider.bytesProcessed || 0) + Number(bytesProcessed || 0);
+    if (provider.reputationScore === undefined) provider.reputationScore = 80;
+    provider.reputationScore = Math.min(100, provider.reputationScore + 1);
 
     saveDB();
     console.log(`💸 Point Transfer: ${transferAmt.toFixed(2)} credits from ${fromNodeId} to ${toNodeId}`);
@@ -124,6 +128,16 @@ export const db = {
     if (!user) throw new Error(`Node not found: ${nodeId}`);
     user.points = Math.max(0, Number(balance) || 0);
     saveDB();
+    return { ...user };
+  },
+
+  adjustReputation(nodeId: string, delta: number): UserAccount {
+    const user = dbData.users[nodeId];
+    if (!user) throw new Error(`Node not found: ${nodeId}`);
+    if (user.reputationScore === undefined) user.reputationScore = 80;
+    user.reputationScore = Math.max(0, Math.min(100, user.reputationScore + delta));
+    saveDB();
+    console.log(`📈 Reputation Adjusted: Node ${nodeId} by ${delta}. New reputation: ${user.reputationScore}`);
     return { ...user };
   }
 };

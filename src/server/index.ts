@@ -10,9 +10,11 @@ interface JobSettings {
   mediaType: 'image' | 'video';
   format: string;
   quality: string;
+  audioBitrate?: string;
   frameCount?: number;
   width?: number;
   height?: number;
+  privacyLevel?: 'public' | 'secure';
 }
 
 interface Job {
@@ -21,12 +23,16 @@ interface Job {
   providerId: string | null;
   providerNodeId: string | null;
   settings: JobSettings;
-  status: 'pending' | 'matched' | 'transferring' | 'transcoding' | 'complete' | 'failed' | 'cancelled';
+  status: 'pending' | 'matched' | 'transferring' | 'transcoding' | 'transcoded' | 'complete' | 'failed' | 'cancelled';
   createdAt: number;
   completedAt?: number;
   failedAt?: number;
   escrowAmount: number;
   escrowRefunded: boolean;
+  isSubJob?: boolean;
+  mainJobId?: string;
+  actualSettings?: JobSettings;
+  transcodeLogs?: any[];
 }
 
 interface Provider {
@@ -87,32 +93,59 @@ function isProviderScoreSufficient(score: number, settings: JobSettings): boolea
   return true;
 }
 
+function isProviderEligibleForJob(prov: Provider, settings: JobSettings): boolean {
+  const services = prov.services || ['video', 'image'];
+  const supportsService = services.includes(settings.mediaType);
+  if (!supportsService) return false;
+
+  const scorePass = isProviderScoreSufficient(prov.benchmarkScore, settings);
+  if (!scorePass) return false;
+
+  const provAccount = db.getAccount(prov.nodeId);
+  const repScore = provAccount ? (provAccount.reputationScore !== undefined ? provAccount.reputationScore : 80) : 0;
+  const privacyPass = settings.privacyLevel === 'secure' ? (repScore >= 95 && prov.benchmarkScore >= 150) : true;
+  return privacyPass;
+}
+
 function refundEscrow(jobId: string, job: Job) {
   if (!job || !job.escrowAmount || job.escrowRefunded) return;
   const clientAcct = db.getAccount(job.clientNodeId);
   if (clientAcct) {
-    db.adjustPoints(job.clientNodeId, clientAcct.points + job.escrowAmount);
+    const updated = db.adjustPoints(job.clientNodeId, clientAcct.points + job.escrowAmount);
     job.escrowRefunded = true;
     console.log(`[Escrow] Refunded ${job.escrowAmount.toFixed(2)} to client ${job.clientNodeId} for job ${jobId}`);
     
     const cl = clients.get(job.clientId);
     if (cl && cl.ws) {
-      send(cl.ws, { type: 'balance-update', points: clientAcct.points + job.escrowAmount });
+      send(cl.ws, { type: 'balance-update', points: updated.points, reputationScore: updated.reputationScore });
     }
   }
 }
 
 app.use((req, res, next) => {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS, PUT, DELETE');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
   res.setHeader('Cross-Origin-Opener-Policy', 'same-origin');
   res.setHeader('Cross-Origin-Embedder-Policy', 'require-corp');
+  if (req.method === 'OPTIONS') {
+    return res.sendStatus(200);
+  }
   next();
 });
 
 app.use(express.static(path.join(__dirname, '..', 'public')));
 
+// Network Benchmark Endpoint
+app.post('/api/test-upload', express.raw({ limit: '20mb', type: '*/*' }), (req, res) => {
+  // We just want to measure the time it takes to receive the data
+  res.status(200).send('ok');
+});
+
 const providers = new Map<string, Provider>();
 const clients = new Map<string, Client>();
 const jobs = new Map<string, Job>();
+const verificationTimers = new Map<string, NodeJS.Timeout>();
 const MAX_HISTORY = 100;
 let jobHistory: any[] = [];
 let peerCounter = 0;
@@ -152,13 +185,15 @@ app.delete('/api/history', (req, res) => {
 const wss = new WebSocketServer({ server });
 
 function sanitizeJobSettings(settings: any): JobSettings {
-  if (!settings) return { fileName: 'unnamed', fileSize: 0, mediaType: 'video', format: 'mp4', quality: '720' };
+  if (!settings) return { fileName: 'unnamed', fileSize: 0, mediaType: 'video', format: 'mp4', quality: '720', audioBitrate: '128k', privacyLevel: 'public' };
   return {
     fileName: String(settings.fileName || 'unnamed').replace(/[<>]/g, '').substring(0, 100),
     fileSize: Number(settings.fileSize) || 0,
     mediaType: settings.mediaType === 'image' ? 'image' : 'video',
     format: String(settings.format || 'mp4').replace(/[^a-z0-9]/g, ''),
-    quality: String(settings.quality || '720').replace(/[^0-9]/g, '')
+    quality: String(settings.quality || '720').replace(/[^0-9a-zA-Z]/g, ''),
+    audioBitrate: settings.audioBitrate ? String(settings.audioBitrate).replace(/[^a-z0-9]/g, '') : '128k',
+    privacyLevel: settings.privacyLevel === 'secure' ? 'secure' : 'public'
   };
 }
 
@@ -181,6 +216,70 @@ function getStats() {
     activeJobs: [...jobs.values()].filter(j => ['matched', 'transferring', 'transcoding'].includes(j.status)).length,
     totalCompleted
   };
+}
+
+function finalizeJobCompletion(jobId: string, actualSettings: JobSettings, logs: any[]) {
+  const job = jobs.get(jobId);
+  if (!job || job.status === 'complete' || job.status === 'failed') return;
+
+  const timer = verificationTimers.get(jobId);
+  if (timer) {
+    clearTimeout(timer);
+    verificationTimers.delete(jobId);
+  }
+
+  const prov = job.providerId ? providers.get(job.providerId) : null;
+  if (prov) {
+    let finalCost = calculateJobCost(actualSettings);
+    if (job.isSubJob) {
+      finalCost = Math.round(finalCost * 0.85 * 100) / 100;
+    }
+    const escrow = job.escrowAmount || 0;
+
+    job.escrowAmount = 0;
+    job.escrowRefunded = true;
+
+    try {
+      const clientAcct = db.getAccount(job.clientNodeId);
+      if (clientAcct) {
+        db.adjustPoints(job.clientNodeId, clientAcct.points + escrow);
+      }
+      const transferRes = db.transferPoints(job.clientNodeId, prov.nodeId, finalCost, job.settings.fileSize);
+
+      const cl = clients.get(job.clientId) || providers.get(job.clientId);
+      if (cl) send(cl.ws, { type: 'balance-update', points: transferRes.client.points, reputationScore: transferRes.client.reputationScore });
+      send(prov.ws, { type: 'balance-update', points: transferRes.provider.points, reputationScore: transferRes.provider.reputationScore });
+    } catch (err) {
+      console.error('Point settlement failed:', err);
+    }
+  }
+
+  job.status = 'complete';
+  job.completedAt = Date.now();
+  totalCompleted++;
+  releaseProviderForJob(jobId, job);
+
+  const record = {
+    jobId: jobId,
+    status: 'complete',
+    settings: job.settings,
+    clientId: job.clientId,
+    providerId: job.providerId,
+    createdAt: job.createdAt,
+    completedAt: job.completedAt,
+    duration: job.completedAt - job.createdAt,
+    error: null,
+    logs: Array.isArray(logs) ? logs.slice(0, 50) : []
+  };
+  jobHistory.push(record);
+  if (jobHistory.length > MAX_HISTORY) jobHistory.shift();
+
+  // Notify client and worker that job is finalized
+  const cl = clients.get(job.clientId) || providers.get(job.clientId);
+  if (cl) send(cl.ws, { type: 'job-finalized', jobId });
+  if (prov) send(prov.ws, { type: 'job-finalized', jobId });
+
+  broadcast({ type: 'stats', ...getStats() });
 }
 
 interface SocketWithMetadata extends WebSocket {
@@ -226,11 +325,10 @@ wss.on('connection', (ws: SocketWithMetadata) => {
             send(ws, { type: 'registered', role: 'provider', peerId, account });
 
             if (status === 'online') {
-              for (const [jobId, job] of jobs) {
-                if (job.status === 'pending') {
-                  const supportsService = services.includes(job.settings.mediaType);
-                  const scorePass = isProviderScoreSufficient(account.benchmarkScore || 0, job.settings);
-                  if (supportsService && scorePass) {
+              const prov = providers.get(peerId);
+              if (prov) {
+                for (const [jobId, job] of jobs) {
+                  if (job.status === 'pending' && isProviderEligibleForJob(prov, job.settings)) {
                     send(ws, { type: 'job-available', jobId, settings: job.settings, clientId: job.clientId });
                   }
                 }
@@ -264,14 +362,11 @@ wss.on('connection', (ws: SocketWithMetadata) => {
         providers.set(peerId, { ws, status, currentJob: null, services, nodeId, benchmarkScore });
         send(ws, { type: 'registered', role: 'provider', peerId });
 
-        if (status === 'online') {
+        const prov = providers.get(peerId);
+        if (status === 'online' && prov) {
           for (const [jobId, job] of jobs) {
-            if (job.status === 'pending') {
-              const supportsService = services.includes(job.settings.mediaType);
-              const scorePass = isProviderScoreSufficient(benchmarkScore, job.settings);
-              if (supportsService && scorePass) {
-                send(ws, { type: 'job-available', jobId, settings: job.settings, clientId: job.clientId });
-              }
+            if (job.status === 'pending' && isProviderEligibleForJob(prov, job.settings)) {
+              send(prov.ws, { type: 'job-available', jobId, settings: job.settings, clientId: job.clientId });
             }
           }
         }
@@ -297,12 +392,8 @@ wss.on('connection', (ws: SocketWithMetadata) => {
           const services = prov.services || ['video', 'image'];
           const score = prov.benchmarkScore || 0;
           for (const [jobId, job] of jobs) {
-            if (job.status === 'pending') {
-              const supportsService = services.includes(job.settings.mediaType);
-              const scorePass = isProviderScoreSufficient(score, job.settings);
-              if (supportsService && scorePass) {
-                send(prov.ws, { type: 'job-available', jobId, settings: job.settings, clientId: job.clientId });
-              }
+            if (job.status === 'pending' && isProviderEligibleForJob(prov, job.settings)) {
+              send(prov.ws, { type: 'job-available', jobId, settings: job.settings, clientId: job.clientId });
             }
           }
         }
@@ -316,12 +407,8 @@ wss.on('connection', (ws: SocketWithMetadata) => {
           prov.services = msg.services;
           
           for (const [jobId, job] of jobs) {
-            if (job.status === 'pending') {
-              const supportsService = prov.services.includes(job.settings.mediaType);
-              const scorePass = isProviderScoreSufficient(prov.benchmarkScore, job.settings);
-              if (supportsService && scorePass) {
-                send(prov.ws, { type: 'job-available', jobId, settings: job.settings, clientId: job.clientId });
-              }
+            if (job.status === 'pending' && isProviderEligibleForJob(prov, job.settings)) {
+              send(prov.ws, { type: 'job-available', jobId, settings: job.settings, clientId: job.clientId });
             }
           }
         }
@@ -376,11 +463,15 @@ wss.on('connection', (ws: SocketWithMetadata) => {
         send(ws, { type: 'job-created', jobId, estimatedCost, newBalance: account.points - estimatedCost });
 
         for (const [pid, prov] of providers) {
-          if (prov.status === 'online' && !prov.currentJob) {
+          if (prov.status === 'online' && !prov.currentJob && isProviderEligibleForJob(prov, settings)) {
             const services = prov.services || ['video', 'image'];
-            const supportsService = services.includes(settings.mediaType);
-            const scorePass = isProviderScoreSufficient(prov.benchmarkScore, settings);
-            if (supportsService && scorePass) {
+            const isOrchestrator = services.includes('orchestrator');
+
+            // If it's a video job and we have an orchestrator, prefer them
+            const isSmallFile = settings.fileSize && settings.fileSize < 100 * 1024 * 1024;
+            if (settings.mediaType === 'video' && isOrchestrator && !isSmallFile) {
+              send(prov.ws, { type: 'job-available', jobId, settings: job.settings, clientId: peerId, isOrchestrator: true });
+            } else {
               send(prov.ws, { type: 'job-available', jobId, settings: job.settings, clientId: peerId });
             }
           }
@@ -404,12 +495,18 @@ wss.on('connection', (ws: SocketWithMetadata) => {
         prov.currentJob = msg.jobId;
         prov.status = 'busy';
 
-        const client = clients.get(job.clientId);
+        const client = clients.get(job.clientId) || providers.get(job.clientId);
         if (client) {
-          send(client.ws, { type: 'job-matched', jobId: msg.jobId, providerId: peerId });
+          send(client.ws, { 
+            type: 'job-matched', 
+            jobId: msg.jobId, 
+            providerId: peerId, 
+            clientId: job.clientId,
+            isSubJob: !!job.isSubJob 
+          });
         }
 
-        send(ws, { type: 'job-accepted', jobId: msg.jobId, clientId: job.clientId });
+        send(ws, { type: 'job-accepted', jobId: msg.jobId, clientId: job.clientId, isSubJob: !!job.isSubJob });
 
         for (const [pid, p] of providers) {
           if (pid !== peerId) {
@@ -464,7 +561,8 @@ wss.on('connection', (ws: SocketWithMetadata) => {
 
       case 'offer':
       case 'answer':
-      case 'ice-candidate': {
+      case 'ice-candidate':
+      case 'probe-workers-response': {
         const targetId = msg.target;
         let targetWs = providers.get(targetId)?.ws || clients.get(targetId)?.ws;
         if (targetWs) {
@@ -483,12 +581,12 @@ wss.on('connection', (ws: SocketWithMetadata) => {
         break;
       }
 
-      case 'job-complete': {
+      case 'job-transcoded': {
         const job = jobs.get(msg.jobId);
         const prov = providers.get(peerId);
         if (job && prov) {
           if (job.providerId !== peerId) break;
-          if (job.status === 'complete') break;
+          if (job.status === 'complete' || job.status === 'failed') break;
 
           const actualSettings = { ...job.settings };
           if (msg.actualFrames) actualSettings.frameCount = msg.actualFrames;
@@ -497,47 +595,80 @@ wss.on('connection', (ws: SocketWithMetadata) => {
             actualSettings.height = msg.actualHeight;
           }
 
-          const finalCost = calculateJobCost(actualSettings);
-          const escrow = job.escrowAmount || 0;
+          job.actualSettings = actualSettings;
+          job.transcodeLogs = Array.isArray(msg.logs) ? msg.logs : [];
+          job.status = 'transcoded';
 
-          try {
-            const clientAcct = db.getAccount(job.clientNodeId);
-            if (clientAcct) {
-              db.adjustPoints(job.clientNodeId, clientAcct.points + escrow);
-            }
-            const transferRes = db.transferPoints(job.clientNodeId, prov.nodeId, finalCost, job.settings.fileSize);
+          console.log(`[Verification] Job ${msg.jobId} transcoded by worker. Starting 30s auto-complete timer.`);
 
-            const cl = clients.get(job.clientId);
-            if (cl) send(cl.ws, { type: 'balance-update', points: transferRes.client.points });
-            send(prov.ws, { type: 'balance-update', points: transferRes.provider.points });
+          // Start 30s auto-complete timeout
+          if (verificationTimers.has(msg.jobId)) {
+            clearTimeout(verificationTimers.get(msg.jobId)!);
+          }
+          const timer = setTimeout(() => {
+            console.log(`[Verification] Timeout for job ${msg.jobId}. Auto-completing...`);
+            finalizeJobCompletion(msg.jobId, actualSettings, job.transcodeLogs || []);
+          }, 30000);
+          verificationTimers.set(msg.jobId, timer);
 
-            job.escrowAmount = 0;
-            job.escrowRefunded = true;
-          } catch (err) {
-            console.error('Point settlement failed:', err);
+          // Notify client and worker
+          const cl = clients.get(job.clientId) || providers.get(job.clientId);
+          if (cl) {
+            send(cl.ws, { type: 'job-transcoded', jobId: msg.jobId });
+          }
+          send(prov.ws, { type: 'job-transcoded', jobId: msg.jobId });
+        }
+        break;
+      }
+
+      case 'confirm-job': {
+        const job = jobs.get(msg.jobId);
+        if (job && job.clientId === peerId) {
+          console.log(`[Verification] Client confirmed job ${msg.jobId}. Finalizing...`);
+          finalizeJobCompletion(msg.jobId, job.actualSettings || job.settings, job.transcodeLogs || []);
+        }
+        break;
+      }
+
+      case 'reject-job': {
+        const job = jobs.get(msg.jobId);
+        if (job && job.clientId === peerId && job.status !== 'complete' && job.status !== 'failed') {
+          console.log(`[Verification] Client rejected job ${msg.jobId}. Failing...`);
+          
+          const timer = verificationTimers.get(msg.jobId);
+          if (timer) {
+            clearTimeout(timer);
+            verificationTimers.delete(msg.jobId);
           }
 
-          job.status = 'complete';
-          job.completedAt = Date.now();
-          totalCompleted++;
+          refundEscrow(msg.jobId, job);
+          job.status = 'failed';
+          job.failedAt = Date.now();
           releaseProviderForJob(msg.jobId, job);
-          
+
+          const prov = job.providerId ? providers.get(job.providerId) : null;
+          if (prov) {
+            send(prov.ws, { type: 'job-cancelled', jobId: msg.jobId, error: msg.error || 'Client rejected verification' });
+            db.adjustReputation(prov.nodeId, -10);
+          }
+
           const record = {
             jobId: msg.jobId,
-            status: 'complete',
+            status: 'failed',
             settings: job.settings,
             clientId: job.clientId,
             providerId: job.providerId,
             createdAt: job.createdAt,
-            completedAt: job.completedAt,
-            duration: job.completedAt - job.createdAt,
-            error: null,
-            logs: Array.isArray(msg.logs) ? msg.logs.slice(0, 50) : []
+            completedAt: job.failedAt,
+            duration: job.failedAt - job.createdAt,
+            error: String(msg.error || 'Client rejected verification').substring(0, 200),
+            logs: job.transcodeLogs || []
           };
           jobHistory.push(record);
           if (jobHistory.length > MAX_HISTORY) jobHistory.shift();
+
+          broadcast({ type: 'stats', ...getStats() });
         }
-        broadcast({ type: 'stats', ...getStats() });
         break;
       }
 
@@ -547,12 +678,23 @@ wss.on('connection', (ws: SocketWithMetadata) => {
           if (job.providerId !== peerId) break;
           if (job.status === 'failed' || job.status === 'complete') break;
 
+          const timer = verificationTimers.get(msg.jobId);
+          if (timer) {
+            clearTimeout(timer);
+            verificationTimers.delete(msg.jobId);
+          }
+
           refundEscrow(msg.jobId, job);
 
           job.status = 'failed';
           job.failedAt = Date.now();
           releaseProviderForJob(msg.jobId, job);
-          const cl = clients.get(job.clientId);
+
+          if (job.providerNodeId) {
+            db.adjustReputation(job.providerNodeId, -10);
+          }
+
+          const cl = clients.get(job.clientId) || providers.get(job.clientId);
           if (cl) send(cl.ws, { type: 'job-failed', jobId: msg.jobId, error: msg.error });
           
           const record = {
@@ -581,14 +723,126 @@ wss.on('connection', (ws: SocketWithMetadata) => {
       }
 
       case 'add-test-credits': {
-        const clientInfo = clients.get(peerId) || providers.get(peerId);
-        if (clientInfo && clientInfo.nodeId) {
-          const account = db.getAccount(clientInfo.nodeId);
+        if (!ws._nodeId) {
+          send(ws, { type: 'error', message: 'Identity not registered. Cannot add credits.' });
+          break;
+        }
+        try {
+          const account = db.getAccount(ws._nodeId);
           if (account) {
-            const newPoints = account.points + 1000.0;
-            db.adjustPoints(clientInfo.nodeId, newPoints);
-            send(ws, { type: 'balance-update', points: newPoints });
-            console.log(`🎁 Gifted 1000.0 test credits to node ${clientInfo.nodeId}`);
+            const updated = db.adjustPoints(ws._nodeId, account.points + 1000);
+            send(ws, { type: 'balance-update', points: updated.points, reputationScore: updated.reputationScore });
+            console.log(`🎁 Added 1000 test credits to node ${ws._nodeId}. New balance: ${updated.points}`);
+          } else {
+            send(ws, { type: 'error', message: 'Account not found.' });
+          }
+        } catch (e: any) {
+          send(ws, { type: 'error', message: 'Failed to add credits: ' + e.message });
+        }
+        break;
+      }
+
+      case 'request-workers': {
+        const mainJob = jobs.get(msg.jobId);
+        if (!mainJob || mainJob.providerId !== peerId) break;
+
+        const subJobSettings = msg.settings;
+        let found = 0;
+
+        if (Array.isArray(msg.workers)) {
+          for (const targetPid of msg.workers) {
+            const prov = providers.get(targetPid);
+            if (prov && prov.status === 'online' && !prov.currentJob && isProviderEligibleForJob(prov, subJobSettings)) {
+              const services = prov.services || ['video', 'image'];
+              if (services.includes(subJobSettings.mediaType)) {
+                const subJobId = `${msg.jobId}-sub-${found}-${Math.random().toString(36).substring(2, 8)}`;
+                
+                // Register sub-job
+                jobs.set(subJobId, {
+                  clientId: peerId, // Orchestrator is client
+                  clientNodeId: mainJob.providerNodeId!, 
+                  providerId: null,
+                  providerNodeId: null,
+                  settings: {
+                    ...subJobSettings,
+                    audioBitrate: subJobSettings.audioBitrate || '128k'
+                  },
+                  status: 'pending',
+                  createdAt: Date.now(),
+                  escrowAmount: 0,
+                  escrowRefunded: true,
+                  isSubJob: true,
+                  mainJobId: msg.jobId
+                } as any);
+
+                send(prov.ws, { 
+                  type: 'job-available', 
+                  jobId: subJobId, 
+                  settings: subJobSettings, 
+                  clientId: peerId,
+                  isSubJob: true 
+                });
+                
+                found++;
+              }
+            }
+          }
+        } else {
+          const count = Number(msg.count) || 1;
+          for (const [pid, prov] of providers) {
+            if (pid !== peerId && prov.status === 'online' && !prov.currentJob && isProviderEligibleForJob(prov, subJobSettings)) {
+              const services = prov.services || ['video', 'image'];
+              if (services.includes(subJobSettings.mediaType)) {
+                const subJobId = `${msg.jobId}-sub-${found}-${Math.random().toString(36).substring(2, 8)}`;
+                
+                // Register sub-job
+                jobs.set(subJobId, {
+                  clientId: peerId, // Orchestrator is client
+                  clientNodeId: mainJob.providerNodeId!, 
+                  providerId: null,
+                  providerNodeId: null,
+                  settings: {
+                    ...subJobSettings,
+                    audioBitrate: subJobSettings.audioBitrate || '128k'
+                  },
+                  status: 'pending',
+                  createdAt: Date.now(),
+                  escrowAmount: 0,
+                  escrowRefunded: true,
+                  isSubJob: true,
+                  mainJobId: msg.jobId
+                } as any);
+
+                send(prov.ws, { 
+                  type: 'job-available', 
+                  jobId: subJobId, 
+                  settings: subJobSettings, 
+                  clientId: peerId,
+                  isSubJob: true 
+                });
+                
+                found++;
+                if (found >= count) break;
+              }
+            }
+          }
+        }
+        break;
+      }
+
+      case 'probe-workers': {
+        const settings = sanitizeJobSettings(msg.settings);
+        for (const [pid, prov] of providers) {
+          if (pid !== peerId && prov.status === 'online') {
+            const services = prov.services || ['video', 'image'];
+            if (services.includes(settings.mediaType)) {
+              send(prov.ws, {
+                type: 'probe-workers-request',
+                jobId: msg.jobId,
+                orchestratorId: peerId,
+                settings
+              });
+            }
           }
         }
         break;
@@ -601,11 +855,20 @@ wss.on('connection', (ws: SocketWithMetadata) => {
       const prov = providers.get(peerId)!;
       if (prov.currentJob) {
         const job = jobs.get(prov.currentJob);
-        if (job && job.status !== 'complete') {
+        if (job && job.status !== 'complete' && job.status !== 'failed') {
+          const timer = verificationTimers.get(prov.currentJob);
+          if (timer) {
+            clearTimeout(timer);
+            verificationTimers.delete(prov.currentJob);
+          }
+
           refundEscrow(prov.currentJob, job);
           job.status = 'failed';
           job.failedAt = Date.now();
-          const cl = clients.get(job.clientId);
+
+          db.adjustReputation(prov.nodeId, -10);
+
+          const cl = clients.get(job.clientId) || providers.get(job.clientId);
           if (cl) send(cl.ws, { type: 'job-failed', jobId: prov.currentJob, error: 'Provider disconnected' });
           
           jobHistory.push({
