@@ -31,8 +31,12 @@
     "appId": "com.transcodenet.app",
     "productName": "TranscodeNet",
     "directories": {
-      "output": "dist"
+      "output": "release"
     },
+    "files": [
+      "dist/**/*",
+      "package.json"
+    ],
     "win": {
       "target": [
         "nsis"
